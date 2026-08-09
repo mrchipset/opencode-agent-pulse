@@ -2,17 +2,39 @@
   "name": "opencode-agent-pulse",
   "version": "0.1.0",
   "type": "module",
+  "description": "OpenCode TUI plugin that live-displays running subagents in the sidebar with busy/idle status, elapsed time, and click-through to the sub-session context.",
+  "license": "MIT",
+  "author": "zouyu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrchipset/opencode-agent-pulse.git"
+  },
+  "keywords": [
+    "opencode",
+    "tui",
+    "plugin",
+    "subagent",
+    "sub-agent",
+    "sidebar",
+    "agent"
+  ],
   "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js",
     "./tui": "./dist/tui.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "opencode": "^1.0.0"
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.9",
