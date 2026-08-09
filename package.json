@@ -1,0 +1,24 @@
+{
+  "name": "opencode-agent-pulse",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
+  },
+  "engines": {
+    "opencode": "^1.0.0"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.9",
+    "@opentui/core": "latest",
+    "@opentui/solid": "^0.5.1",
+    "@types/node": "^24",
+    "typescript": "^5"
+  }
+}
