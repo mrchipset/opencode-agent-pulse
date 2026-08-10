@@ -1,5 +1,5 @@
 import type { TuiPluginModule } from "@opencode-ai/plugin/tui";
-import type { ToolPart } from "@opencode-ai/sdk/v2";
+import type { Session, ToolPart } from "@opencode-ai/sdk/v2";
 import { createElement, insert, setProp } from "@opentui/solid";
 import type { JSX } from "@opentui/solid";
 import { createSignal } from "solid-js";
@@ -9,15 +9,27 @@ import { createSignal } from "solid-js";
  *
  * Data source (session events + task tool parts):
  *   - `session.created`         -> identify sub-sessions via `properties.info.parentID`
+ *   - `session.updated`         -> backfill: resumed/existing sub-sessions never emit
+ *                                   `session.created`, but `Session.patch` publishes
+ *                                   `session.updated` with the full Session (parentID +
+ *                                   agent + title) whenever the session is touched
+ *                                   (e.g. on message activity). Used to add missing
+ *                                   entries and refresh agent/title without resetting
+ *                                   status or timers.
  *   - `session.status`          -> `properties.status.type` ("busy" | "idle" | "retry")
  *   - `message.part.updated`    -> task tool part (`part.tool === "task"`) reports
- *                                   sub-session completion: `part.state.status` is
- *                                   "completed" / "error". Child session is linked via
- *                                   metadata `sessionId`/`sessionID` (state.metadata first,
- *                                   then part.metadata). This mirrors the built-in subagent
- *                                   panel (subagent-data.ts); `session.idle` is deprecated
- *                                   and not a completion signal.
+ *                                   sub-session lifecycle: `part.state.status` is
+ *                                   "running" (mark busy) or "completed"/"error"
+ *                                   (mark done). Child session is linked via metadata
+ *                                   `sessionId`/`sessionID` (state.metadata first,
+ *                                   then part.metadata). This mirrors the built-in
+ *                                   subagent panel (subagent-data.ts); `session.idle`
+ *                                   is deprecated and not a completion signal.
  *   - `session.deleted` / `session.error` -> remove / mark done
+ *
+ * Bootstrap: on startup, `api.client.session.list()` backfills sub-sessions that
+ * already exist (e.g. a resumed parent session's children) so the sidebar shows them
+ * even though `session.created` was never emitted for them.
  *
  * Rendering follows the production pattern of oh-my-opencode-slim: plain function-call
  * helpers (`box`/`text`) built on `@opentui/solid`'s `createElement`/`insert`/`setProp`,
@@ -83,6 +95,35 @@ function toolMetadata(part: ToolPart, key: string): unknown {
   return ("metadata" in part.state ? part.state.metadata?.[key] : undefined) ?? part.metadata?.[key];
 }
 
+// Add a sub-session to the running map from a full SDK Session (session.created /
+// session.updated / bootstrap). Keeps any existing entry's status and timers intact.
+// Returns true if the map changed (new entry, or refreshed agent/title).
+function upsertSession(running: Map<string, SubagentInfo>, info: Session): boolean {
+  if (!info.parentID) return false;
+  const existing = running.get(info.id);
+  if (existing) {
+    // Only refresh metadata; never reset status/clock of a tracked entry.
+    let changed = false;
+    if (info.agent && info.agent !== existing.agent) {
+      existing.agent = info.agent;
+      changed = true;
+    }
+    if (info.title && info.title !== existing.title) {
+      existing.title = info.title;
+      changed = true;
+    }
+    return changed;
+  }
+  running.set(info.id, {
+    agent: info.agent ?? "?",
+    status: "idle",
+    since: Date.now(),
+    frozen: 0,
+    title: info.title || undefined,
+  });
+  return true;
+}
+
 const plugin: TuiPluginModule = {
   id: "opencode-agent-pulse:tui",
   tui: async (api, _options, _meta) => {
@@ -97,6 +138,23 @@ const plugin: TuiPluginModule = {
 
     const unsubs: Array<() => void> = [];
 
+    // Bootstrap: backfill sub-sessions that already exist (e.g. a resumed parent
+    // session's children). Resumed sessions never emit session.created, so without
+    // this the sidebar would be blind to them until a brand-new subagent starts.
+    api.client.session
+      .list()
+      .then((result) => {
+        const sessions = result.data ?? [];
+        let changed = false;
+        for (const session of sessions) {
+          if (upsertSession(running, session)) changed = true;
+        }
+        if (changed) syncEntries();
+      })
+      .catch(() => {
+        // Best-effort bootstrap; live events still drive the list afterwards.
+      });
+
     // session.created: only sub-sessions carry a parentID.
     unsubs.push(
       api.event.on("session.created", (event) => {
@@ -110,6 +168,18 @@ const plugin: TuiPluginModule = {
           title: event.properties.info.title || undefined,
         });
         syncEntries();
+      }),
+    );
+
+    // session.updated: fired by Session.patch (e.g. session touch on message activity)
+    // with the full Session. For resumed/existing sub-sessions this is the only event
+    // that carries their identity, so use it to backfill missing entries and refresh
+    // agent/title without disturbing status or the elapsed clock.
+    unsubs.push(
+      api.event.on("session.updated", (event) => {
+        if (upsertSession(running, event.properties.info)) {
+          syncEntries();
+        }
       }),
     );
 
@@ -138,8 +208,8 @@ const plugin: TuiPluginModule = {
       }),
     );
 
-    // message.part.updated: task tool parts report sub-session completion. This is the
-    // same source the built-in subagent panel uses; `session.idle` is deprecated.
+    // message.part.updated: task tool parts report the sub-session lifecycle. This is
+    // the same source the built-in subagent panel uses; `session.idle` is deprecated.
     unsubs.push(
       api.event.on("message.part.updated", (event) => {
         const part = event.properties.part;
@@ -165,7 +235,14 @@ const plugin: TuiPluginModule = {
           info.agent = input.subagent_type.trim();
         }
 
-        if (part.state.status === "completed" || part.state.status === "error") {
+        if (part.state.status === "running") {
+          // A resumed subagent re-runs its task tool part; surface it as busy again.
+          // (The part carries input, so this also refreshes the custom name above.)
+          if (info.status !== "busy" && info.status !== "retry") {
+            info.since = Date.now();
+          }
+          info.status = "busy";
+        } else if (part.state.status === "completed" || part.state.status === "error") {
           // Freeze the clock at completion (no-op if already frozen while idle).
           if (info.status === "busy" || info.status === "retry") {
             info.frozen += Date.now() - info.since;

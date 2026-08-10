@@ -32,6 +32,31 @@ function entryElapsed(info) {
 function toolMetadata(part, key) {
   return ("metadata" in part.state ? part.state.metadata?.[key] : undefined) ?? part.metadata?.[key];
 }
+function upsertSession(running, info) {
+  if (!info.parentID)
+    return false;
+  const existing = running.get(info.id);
+  if (existing) {
+    let changed = false;
+    if (info.agent && info.agent !== existing.agent) {
+      existing.agent = info.agent;
+      changed = true;
+    }
+    if (info.title && info.title !== existing.title) {
+      existing.title = info.title;
+      changed = true;
+    }
+    return changed;
+  }
+  running.set(info.id, {
+    agent: info.agent ?? "?",
+    status: "idle",
+    since: Date.now(),
+    frozen: 0,
+    title: info.title || undefined
+  });
+  return true;
+}
 var plugin = {
   id: "opencode-agent-pulse:tui",
   tui: async (api, _options, _meta) => {
@@ -40,6 +65,16 @@ var plugin = {
     const [collapsed, setCollapsed] = createSignal(false);
     const syncEntries = () => setRunningEntries([...running.entries()]);
     const unsubs = [];
+    api.client.session.list().then((result) => {
+      const sessions = result.data ?? [];
+      let changed = false;
+      for (const session of sessions) {
+        if (upsertSession(running, session))
+          changed = true;
+      }
+      if (changed)
+        syncEntries();
+    }).catch(() => {});
     unsubs.push(api.event.on("session.created", (event) => {
       const parentID = event.properties?.info?.parentID;
       if (!parentID)
@@ -52,6 +87,11 @@ var plugin = {
         title: event.properties.info.title || undefined
       });
       syncEntries();
+    }));
+    unsubs.push(api.event.on("session.updated", (event) => {
+      if (upsertSession(running, event.properties.info)) {
+        syncEntries();
+      }
     }));
     unsubs.push(api.event.on("session.status", (event) => {
       const info = running.get(event.properties.sessionID);
@@ -90,7 +130,12 @@ var plugin = {
       if (typeof input.subagent_type === "string" && input.subagent_type.trim()) {
         info.agent = input.subagent_type.trim();
       }
-      if (part.state.status === "completed" || part.state.status === "error") {
+      if (part.state.status === "running") {
+        if (info.status !== "busy" && info.status !== "retry") {
+          info.since = Date.now();
+        }
+        info.status = "busy";
+      } else if (part.state.status === "completed" || part.state.status === "error") {
         if (info.status === "busy" || info.status === "retry") {
           info.frozen += Date.now() - info.since;
         }
