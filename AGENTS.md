@@ -178,6 +178,33 @@ bun run build
 # check that dist/index.js and dist/tui.js were generated
 ```
 
+## Publishing to npm (release workflow)
+
+Publish a new version when code changes are verified locally. Keep npm, Git tags, and commits in sync — every release must run the full sequence below:
+
+1. **Bump the version** (semver: patch for fixes, minor for features, major for breaking changes):
+   ```bash
+   npm version patch   # or minor / major; do NOT use --no-git-tag-version
+   ```
+   This bumps `package.json` and creates a git commit (keeps the version bump in history).
+2. **Publish to npm** (always target the official registry explicitly — the local npm default may be a mirror such as npmmirror, which does not accept publishes):
+   ```bash
+   npm publish --registry=https://registry.npmjs.org/
+   ```
+   `prepublishOnly` rebuilds `dist/` automatically before packaging. The npm account has 2FA enabled; a Granular Access Token with "Bypass 2fa" is configured in `~/.npmrc`, so no OTP is needed.
+3. **Tag the release** with an annotated tag pointing at the release commit:
+   ```bash
+   git tag -a v<version> -m "<version>: <summary of changes>"
+   ```
+4. **Push commit + tag**:
+   ```bash
+   git push origin main
+   git push origin v<version>
+   ```
+5. **Verify**: `npm view opencode-agent-pulse version` shows the new version; `git ls-remote --tags origin` includes the new tag.
+
+Note: published versions are immutable on npm. Never reuse a version number; bump before every publish.
+
 ## Registering on the user machine (`C:\Users\Zouyu\.config\opencode`)
 
 1. Add the dependency `"opencode-agent-pulse": "file:<path to this project>"` to `package.json` (in that directory), then `bun install` (or use `bun link`).
