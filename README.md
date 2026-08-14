@@ -54,6 +54,7 @@ Both notifications are enabled by default and can be toggled via plugin options 
 |---|---|---|
 | `notifications.subagents` | `true` | Notify when all delegated subagents of a batch have finished |
 | `notifications.mainSession` | `true` | Notify when the main (top-level) session finishes a conversation turn |
+| `notifications.interview` | `true` | Notify when the main session is blocked waiting for user input (question / permission approval) |
 
 ## Usage
 

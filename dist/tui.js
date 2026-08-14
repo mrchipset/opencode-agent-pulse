@@ -55,6 +55,13 @@ async function notifyTurnDone(api) {
     sound: { name: "done" }
   });
 }
+async function notifyInterviewInput(api, kind, detail) {
+  await dispatch(api, {
+    title: "opencode-agent-pulse",
+    message: kind === "permission" ? detail ? `需要权限确认: ${detail}` : "主会话需要权限确认" : detail ? `需要回答: ${detail}` : "主会话需要回答询问",
+    sound: kind === "permission" ? { name: "permission" } : { name: "question" }
+  });
+}
 
 // src/tui.ts
 function element(tag, props = {}, children = []) {
@@ -119,6 +126,7 @@ var plugin = {
     const notifCfg = options?.notifications;
     const notifySubagents = notifCfg?.subagents ?? true;
     const notifyMainSession = notifCfg?.mainSession ?? true;
+    const notifyInterview = notifCfg?.interview ?? true;
     const running = new Map;
     const [runningEntries, setRunningEntries] = createSignal([]);
     const [collapsed, setCollapsed] = createSignal(false);
@@ -126,6 +134,8 @@ var plugin = {
     let activeTaskCount = 0;
     let roundNotified = false;
     const mainArmed = new Set;
+    const pendingQuestions = new Set;
+    const pendingPermissions = new Set;
     const syncEntries = () => setRunningEntries([...running.entries()]);
     const unsubs = [];
     api.client.session.list().then((result) => {
@@ -257,6 +267,30 @@ var plugin = {
         info.status = "done";
         syncEntries();
       }
+    }));
+    unsubs.push(api.event.on("question.asked", (event) => {
+      const { id, sessionID, questions } = event.properties;
+      if (!notifyInterview || running.has(sessionID) || pendingQuestions.has(id))
+        return;
+      pendingQuestions.add(id);
+      const first = questions?.[0];
+      notifyInterviewInput(api, "question", first?.question || first?.header).catch(() => {});
+    }));
+    unsubs.push(api.event.on("question.replied", (event) => {
+      pendingQuestions.delete(event.properties.requestID);
+    }));
+    unsubs.push(api.event.on("question.rejected", (event) => {
+      pendingQuestions.delete(event.properties.requestID);
+    }));
+    unsubs.push(api.event.on("permission.asked", (event) => {
+      const { id, sessionID, permission } = event.properties;
+      if (!notifyInterview || running.has(sessionID) || pendingPermissions.has(id))
+        return;
+      pendingPermissions.add(id);
+      notifyInterviewInput(api, "permission", permission).catch(() => {});
+    }));
+    unsubs.push(api.event.on("permission.replied", (event) => {
+      pendingPermissions.delete(event.properties.requestID);
     }));
     const ticker = setInterval(() => {
       let active = false;

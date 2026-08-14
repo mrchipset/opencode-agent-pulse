@@ -100,6 +100,29 @@ export async function notifyTurnDone(api: Api): Promise<void> {
   });
 }
 
+/** What kind of user interaction is blocking the main session. */
+export type InterviewKind = "question" | "permission";
+
+/**
+ * Notify that the main session is blocked waiting for user input (an interview:
+ * the `question` tool asking the user something, or a permission/approval prompt).
+ * These are the two ways an agent turn is suspended mid-run on user interaction.
+ */
+export async function notifyInterviewInput(api: Api, kind: InterviewKind, detail?: string): Promise<void> {
+  await dispatch(api, {
+    title: "opencode-agent-pulse",
+    message:
+      kind === "permission"
+        ? detail
+          ? `需要权限确认: ${detail}`
+          : "主会话需要权限确认"
+        : detail
+          ? `需要回答: ${detail}`
+          : "主会话需要回答询问",
+    sound: kind === "permission" ? { name: "permission" } : { name: "question" },
+  });
+}
+
 /** In-app toast fallback (works on every platform). */
 export function toast(api: Api, message: string): void {
   try {

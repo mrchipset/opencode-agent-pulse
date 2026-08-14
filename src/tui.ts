@@ -3,7 +3,7 @@ import type { Session, ToolPart } from "@opencode-ai/sdk/v2";
 import { createElement, insert, setProp } from "@opentui/solid";
 import type { JSX } from "@opentui/solid";
 import { createSignal } from "solid-js";
-import { notifySubagentsDone, notifyTurnDone } from "./notification";
+import { notifyInterviewInput, notifySubagentsDone, notifyTurnDone } from "./notification";
 
 /**
  * Sidebar widget that live-tracks running subagents (sub-sessions).
@@ -130,10 +130,11 @@ const plugin: TuiPluginModule = {
   tui: async (api, options, _meta) => {
     // Notification toggles from plugin options (registered via the tuple form:
     // ["opencode-agent-pulse", { "notifications": { ... } }]).
-    const notifCfg = (options as { notifications?: { subagents?: boolean; mainSession?: boolean } } | undefined)
+    const notifCfg = (options as { notifications?: { subagents?: boolean; mainSession?: boolean; interview?: boolean } } | undefined)
       ?.notifications;
     const notifySubagents = notifCfg?.subagents ?? true;
     const notifyMainSession = notifCfg?.mainSession ?? true;
+    const notifyInterview = notifCfg?.interview ?? true;
     // Source of truth for lookups (sessionID -> info). Rendered via `runningEntries`
     // signal below so solid reactivity re-renders the slot on every change.
     const running = new Map<string, SubagentInfo>();
@@ -152,6 +153,13 @@ const plugin: TuiPluginModule = {
     // sessionID so multiple top-level sessions don't interfere; mirrors the built-in
     // notifications plugin behavior.
     const mainArmed = new Set<string>(); // sessionIDs armed on busy/retry, fired on idle
+    // "Interview blocked" detection: when the main session is suspended waiting for user
+    // input (`question` tool or permission approval), notify once per pending request.
+    // question.asked / permission.asked are the authoritative signals — the agent is
+    // parked on a Deferred, so no session.status change is emitted. Dedup by request id
+    // and clear on replied/rejected (mirrors the built-in notifications plugin).
+    const pendingQuestions = new Set<string>(); // question request ids awaiting an answer
+    const pendingPermissions = new Set<string>(); // permission request ids awaiting a reply
 
     const syncEntries = () => setRunningEntries([...running.entries()]);
 
@@ -341,6 +349,48 @@ const plugin: TuiPluginModule = {
           info.status = "done";
           syncEntries();
         }
+      }),
+    );
+
+    // "Interview blocked" notifications: the main session is suspended waiting for user
+    // input. `question.asked` fires when the agent asks the user something (plan
+    // confirmation, choices, etc.); `permission.asked` fires when the agent needs an
+    // approval (e.g. to write a file or run a command). No session.status change is
+    // emitted during the wait (the agent is parked on a Deferred), so these events are
+    // the only reliable signal. Main sessions only: subagent requests are filtered out
+    // (a subagent's own interview belongs to its delegation flow, not the main turn).
+    // Dedup by request id and clear on replied/rejected, mirroring the built-in
+    // notifications plugin (notifications.ts).
+    unsubs.push(
+      api.event.on("question.asked", (event) => {
+        const { id, sessionID, questions } = event.properties;
+        if (!notifyInterview || running.has(sessionID) || pendingQuestions.has(id)) return;
+        pendingQuestions.add(id);
+        const first = questions?.[0];
+        notifyInterviewInput(api, "question", first?.question || first?.header).catch(() => {});
+      }),
+    );
+    unsubs.push(
+      api.event.on("question.replied", (event) => {
+        pendingQuestions.delete(event.properties.requestID);
+      }),
+    );
+    unsubs.push(
+      api.event.on("question.rejected", (event) => {
+        pendingQuestions.delete(event.properties.requestID);
+      }),
+    );
+    unsubs.push(
+      api.event.on("permission.asked", (event) => {
+        const { id, sessionID, permission } = event.properties;
+        if (!notifyInterview || running.has(sessionID) || pendingPermissions.has(id)) return;
+        pendingPermissions.add(id);
+        notifyInterviewInput(api, "permission", permission).catch(() => {});
+      }),
+    );
+    unsubs.push(
+      api.event.on("permission.replied", (event) => {
+        pendingPermissions.delete(event.properties.requestID);
       }),
     );
 
