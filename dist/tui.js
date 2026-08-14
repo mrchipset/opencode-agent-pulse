@@ -115,7 +115,10 @@ function upsertSession(running, info) {
 }
 var plugin = {
   id: "opencode-agent-pulse:tui",
-  tui: async (api, _options, _meta) => {
+  tui: async (api, options, _meta) => {
+    const notifCfg = options?.notifications;
+    const notifySubagents = notifCfg?.subagents ?? true;
+    const notifyMainSession = notifCfg?.mainSession ?? true;
     const running = new Map;
     const [runningEntries, setRunningEntries] = createSignal([]);
     const [collapsed, setCollapsed] = createSignal(false);
@@ -162,7 +165,9 @@ var plugin = {
         } else if (type === "idle") {
           if (mainArmed.has(sessionID)) {
             mainArmed.delete(sessionID);
-            notifyTurnDone(api).catch(() => {});
+            if (notifyMainSession) {
+              notifyTurnDone(api).catch(() => {});
+            }
           }
         }
       }
@@ -198,7 +203,9 @@ var plugin = {
         if (activeTaskCount === 0) {
           if (!roundNotified) {
             roundNotified = true;
-            notifySubagentsDone(api, taskParts.size).catch(() => {});
+            if (notifySubagents) {
+              notifySubagentsDone(api, taskParts.size).catch(() => {});
+            }
           }
         }
       } else if (!wasActive && nowActive) {

@@ -36,6 +36,25 @@ bun run build   # produces dist/index.js and dist/tui.js
 
 4. Restart `opencode`.
 
+## Notifications
+
+The plugin can notify when a whole batch of subagents finishes and/or when the main session completes a turn. On Windows it posts a real Action Center toast via `node-notifier` (Windows Terminal cannot show `api.attention.notify` notifications — OSC 99/DEC 1004 unsupported, issue #35055); on other platforms it uses the built-in `api.attention.notify` with the `done`/`subagent_done` sounds.
+
+Both notifications are enabled by default and can be toggled via plugin options (tuple form in the `plugin` array):
+
+```jsonc
+// opencode.json and/or tui.json
+"plugin": [
+  "oh-my-opencode-slim",
+  ["opencode-agent-pulse", { "notifications": { "subagents": true, "mainSession": false } }]
+]
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `notifications.subagents` | `true` | Notify when all delegated subagents of a batch have finished |
+| `notifications.mainSession` | `true` | Notify when the main (top-level) session finishes a conversation turn |
+
 ## Usage
 
 After starting opencode, trigger a subagent delegation (`/agent` or the Task tool) and the "Subagents" section appears in the sidebar, showing each subagent's agent, status (busy/idle/retry/done), and elapsed time in real time. Click the section header to collapse/expand it.

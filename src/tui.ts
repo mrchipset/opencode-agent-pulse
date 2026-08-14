@@ -127,7 +127,13 @@ function upsertSession(running: Map<string, SubagentInfo>, info: Session): boole
 
 const plugin: TuiPluginModule = {
   id: "opencode-agent-pulse:tui",
-  tui: async (api, _options, _meta) => {
+  tui: async (api, options, _meta) => {
+    // Notification toggles from plugin options (registered via the tuple form:
+    // ["opencode-agent-pulse", { "notifications": { ... } }]).
+    const notifCfg = (options as { notifications?: { subagents?: boolean; mainSession?: boolean } } | undefined)
+      ?.notifications;
+    const notifySubagents = notifCfg?.subagents ?? true;
+    const notifyMainSession = notifCfg?.mainSession ?? true;
     // Source of truth for lookups (sessionID -> info). Rendered via `runningEntries`
     // signal below so solid reactivity re-renders the slot on every change.
     const running = new Map<string, SubagentInfo>();
@@ -212,7 +218,9 @@ const plugin: TuiPluginModule = {
           } else if (type === "idle") {
             if (mainArmed.has(sessionID)) {
               mainArmed.delete(sessionID);
-              notifyTurnDone(api).catch(() => {});
+              if (notifyMainSession) {
+                notifyTurnDone(api).catch(() => {});
+              }
             }
           }
         }
@@ -261,7 +269,9 @@ const plugin: TuiPluginModule = {
             // Batch drained to zero -> all delegated subagents finished.
             if (!roundNotified) {
               roundNotified = true;
-              notifySubagentsDone(api, taskParts.size).catch(() => {});
+              if (notifySubagents) {
+                notifySubagentsDone(api, taskParts.size).catch(() => {});
+              }
             }
           }
         } else if (!wasActive && nowActive) {

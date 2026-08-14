@@ -1,3 +1,13 @@
 {
-  "plugin": ["../dist/tui.js"]
+  "plugin": [
+    [
+      "../dist/tui.js",
+      {
+        "notifications": {
+          "subagents": false,
+          "mainSession": true
+        }
+      }
+    ]
+  ]
 }
