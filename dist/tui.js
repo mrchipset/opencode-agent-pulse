@@ -135,7 +135,7 @@ var plugin = {
     let roundNotified = false;
     const mainArmed = new Set;
     const pendingQuestions = new Set;
-    const pendingPermissions = new Set;
+    const pendingPermissions = new Map;
     const syncEntries = () => setRunningEntries([...running.entries()]);
     const unsubs = [];
     api.client.session.list().then((result) => {
@@ -282,15 +282,25 @@ var plugin = {
     unsubs.push(api.event.on("question.rejected", (event) => {
       pendingQuestions.delete(event.properties.requestID);
     }));
+    const PERMISSION_NOTIFY_DELAY_MS = 500;
     unsubs.push(api.event.on("permission.asked", (event) => {
       const { id, sessionID, permission } = event.properties;
       if (!notifyInterview || running.has(sessionID) || pendingPermissions.has(id))
         return;
-      pendingPermissions.add(id);
-      notifyInterviewInput(api, "permission", permission).catch(() => {});
+      const timer = setTimeout(() => {
+        if (pendingPermissions.delete(id)) {
+          notifyInterviewInput(api, "permission", permission).catch(() => {});
+        }
+      }, PERMISSION_NOTIFY_DELAY_MS);
+      pendingPermissions.set(id, timer);
     }));
     unsubs.push(api.event.on("permission.replied", (event) => {
-      pendingPermissions.delete(event.properties.requestID);
+      const { requestID } = event.properties;
+      const timer = pendingPermissions.get(requestID);
+      if (timer) {
+        clearTimeout(timer);
+        pendingPermissions.delete(requestID);
+      }
     }));
     const ticker = setInterval(() => {
       let active = false;
@@ -305,6 +315,10 @@ var plugin = {
     }, 1000);
     api.lifecycle.onDispose(() => {
       clearInterval(ticker);
+      for (const timer of pendingPermissions.values()) {
+        clearTimeout(timer);
+      }
+      pendingPermissions.clear();
       unsubs.forEach((unsub) => unsub());
     });
     api.slots.register({

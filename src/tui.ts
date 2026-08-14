@@ -159,7 +159,9 @@ const plugin: TuiPluginModule = {
     // parked on a Deferred, so no session.status change is emitted. Dedup by request id
     // and clear on replied/rejected (mirrors the built-in notifications plugin).
     const pendingQuestions = new Set<string>(); // question request ids awaiting an answer
-    const pendingPermissions = new Set<string>(); // permission request ids awaiting a reply
+    // Permission requests awaiting a reply. Values hold the deferred-notification timer
+    // so it can be cancelled when a reply arrives (see the permission.asked handler).
+    const pendingPermissions = new Map<string, ReturnType<typeof setTimeout>>();
 
     const syncEntries = () => setRunningEntries([...running.entries()]);
 
@@ -380,17 +382,39 @@ const plugin: TuiPluginModule = {
         pendingQuestions.delete(event.properties.requestID);
       }),
     );
+    // Permission approval requests. Unlike `question`, permission approvals can be
+    // auto-approved by the client: with auto-approval enabled (`--auto` / TUI
+    // `permission.mode`), the server still emits `permission.asked` and the TUI replies
+    // `"once"` within the same event loop (sync.tsx:190-200) — so a notification fired
+    // immediately is spam even though the user never needs to act. Fix: defer the
+    // notification by a short window and cancel it if a reply arrives in time. Manual
+    // approvals take far longer than the window (the user must read and click), so they
+    // are unaffected. This is the only reliable signal: `permission.asked` carries no
+    // mode field and the auto mode is client-side UI state the plugin cannot read.
+    const PERMISSION_NOTIFY_DELAY_MS = 500;
     unsubs.push(
       api.event.on("permission.asked", (event) => {
         const { id, sessionID, permission } = event.properties;
         if (!notifyInterview || running.has(sessionID) || pendingPermissions.has(id)) return;
-        pendingPermissions.add(id);
-        notifyInterviewInput(api, "permission", permission).catch(() => {});
+        const timer = setTimeout(() => {
+          // Still pending after the window -> the user has to approve it manually.
+          if (pendingPermissions.delete(id)) {
+            notifyInterviewInput(api, "permission", permission).catch(() => {});
+          }
+        }, PERMISSION_NOTIFY_DELAY_MS);
+        pendingPermissions.set(id, timer);
       }),
     );
     unsubs.push(
       api.event.on("permission.replied", (event) => {
-        pendingPermissions.delete(event.properties.requestID);
+        // Fired for both manual and auto approval (reply "once" | "always" | "reject");
+        // either way the user no longer needs to act, so cancel the deferred notification.
+        const { requestID } = event.properties;
+        const timer = pendingPermissions.get(requestID);
+        if (timer) {
+          clearTimeout(timer);
+          pendingPermissions.delete(requestID);
+        }
       }),
     );
 
@@ -408,6 +432,11 @@ const plugin: TuiPluginModule = {
 
     api.lifecycle.onDispose(() => {
       clearInterval(ticker);
+      // Cancel any pending deferred permission notifications.
+      for (const timer of pendingPermissions.values()) {
+        clearTimeout(timer);
+      }
+      pendingPermissions.clear();
       unsubs.forEach((unsub) => unsub());
     });
 
