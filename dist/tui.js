@@ -1,6 +1,62 @@
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined")
+    return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+
 // src/tui.ts
 import { createElement, insert, setProp } from "@opentui/solid";
 import { createSignal } from "solid-js";
+
+// src/notification.ts
+var IS_WINDOWS = process.platform === "win32";
+var WINDOWS_APP_ID = "opencode-agent-pulse";
+function windowsNotify(payload) {
+  import("node-notifier").then((mod) => {
+    const notifier = mod.default ?? mod;
+    notifier.notify({
+      title: payload.title,
+      message: payload.message,
+      appID: WINDOWS_APP_ID,
+      sound: true
+    }, (err, response) => {});
+  }).catch(() => {});
+}
+async function builtinNotify(api, payload) {
+  try {
+    await api.attention.notify({
+      title: payload.title,
+      message: payload.message,
+      notification: { when: "always" },
+      sound: payload.sound
+    });
+  } catch {}
+}
+async function dispatch(api, payload) {
+  if (IS_WINDOWS) {
+    windowsNotify(payload);
+  } else {
+    await builtinNotify(api, payload);
+  }
+}
+async function notifySubagentsDone(api, count) {
+  await dispatch(api, {
+    title: "opencode-agent-pulse",
+    message: count > 1 ? `全部 ${count} 个子 agent 已完成` : "子 agent 已完成",
+    sound: { name: "subagent_done" }
+  });
+}
+async function notifyTurnDone(api) {
+  await dispatch(api, {
+    title: "opencode-agent-pulse",
+    message: "本轮对话已完成",
+    sound: { name: "done" }
+  });
+}
+
+// src/tui.ts
 function element(tag, props = {}, children = []) {
   const node = createElement(tag);
   for (const [key, value] of Object.entries(props)) {
@@ -63,6 +119,10 @@ var plugin = {
     const running = new Map;
     const [runningEntries, setRunningEntries] = createSignal([]);
     const [collapsed, setCollapsed] = createSignal(false);
+    const taskParts = new Map;
+    let activeTaskCount = 0;
+    let roundNotified = false;
+    const mainArmed = new Set;
     const syncEntries = () => setRunningEntries([...running.entries()]);
     const unsubs = [];
     api.client.session.list().then((result) => {
@@ -94,10 +154,21 @@ var plugin = {
       }
     }));
     unsubs.push(api.event.on("session.status", (event) => {
-      const info = running.get(event.properties.sessionID);
+      const sessionID = event.properties.sessionID;
+      const type = event.properties.status.type;
+      if (!running.has(sessionID)) {
+        if (type === "busy" || type === "retry") {
+          mainArmed.add(sessionID);
+        } else if (type === "idle") {
+          if (mainArmed.has(sessionID)) {
+            mainArmed.delete(sessionID);
+            notifyTurnDone(api).catch(() => {});
+          }
+        }
+      }
+      const info = running.get(sessionID);
       if (!info)
         return;
-      const type = event.properties.status.type;
       if (type === "busy" || type === "retry") {
         if (info.status !== "busy" && info.status !== "retry") {
           info.since = Date.now();
@@ -117,6 +188,24 @@ var plugin = {
       const part = event.properties.part;
       if (part.type !== "tool" || part.tool !== "task")
         return;
+      const status = part.state.status;
+      const prevStatus = taskParts.get(part.callID);
+      taskParts.set(part.callID, status);
+      const wasActive = prevStatus === "pending" || prevStatus === "running";
+      const nowActive = status === "pending" || status === "running";
+      if (wasActive && !nowActive) {
+        activeTaskCount--;
+        if (activeTaskCount === 0) {
+          if (!roundNotified) {
+            roundNotified = true;
+            notifySubagentsDone(api, taskParts.size).catch(() => {});
+          }
+        }
+      } else if (!wasActive && nowActive) {
+        if (activeTaskCount === 0)
+          roundNotified = false;
+        activeTaskCount++;
+      }
       const childID = (typeof toolMetadata(part, "sessionId") === "string" ? toolMetadata(part, "sessionId") : undefined) ?? (typeof toolMetadata(part, "sessionID") === "string" ? toolMetadata(part, "sessionID") : undefined);
       if (typeof childID !== "string")
         return;
@@ -144,6 +233,7 @@ var plugin = {
       syncEntries();
     }));
     unsubs.push(api.event.on("session.deleted", (event) => {
+      mainArmed.delete(event.properties.sessionID);
       if (running.delete(event.properties.sessionID)) {
         syncEntries();
       }

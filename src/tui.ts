@@ -3,6 +3,7 @@ import type { Session, ToolPart } from "@opencode-ai/sdk/v2";
 import { createElement, insert, setProp } from "@opentui/solid";
 import type { JSX } from "@opentui/solid";
 import { createSignal } from "solid-js";
+import { notifySubagentsDone, notifyTurnDone } from "./notification";
 
 /**
  * Sidebar widget that live-tracks running subagents (sub-sessions).
@@ -134,6 +135,18 @@ const plugin: TuiPluginModule = {
     // Collapse state, matches MCP/TODO section interaction (built-in uses createSignal too).
     const [collapsed, setCollapsed] = createSignal(false);
 
+    // --- Notification state ---
+    // "All subagents done" detection: track every task tool part's lifecycle so we can
+    // notify once when a whole delegation round drains to zero active parts.
+    const taskParts = new Map<string, string>(); // callID -> current status
+    let activeTaskCount = 0; // # task parts currently "pending" or "running"
+    let roundNotified = false; // dedup: has the current batch already been announced?
+    // "Turn done" detection: main (non-sub) sessions only. We notify on the busy->idle
+    // transition of a main session, which fires once per round. Armed set keyed by
+    // sessionID so multiple top-level sessions don't interfere; mirrors the built-in
+    // notifications plugin behavior.
+    const mainArmed = new Set<string>(); // sessionIDs armed on busy/retry, fired on idle
+
     const syncEntries = () => setRunningEntries([...running.entries()]);
 
     const unsubs: Array<() => void> = [];
@@ -186,9 +199,26 @@ const plugin: TuiPluginModule = {
     // session.status: busy / idle / retry.
     unsubs.push(
       api.event.on("session.status", (event) => {
-        const info = running.get(event.properties.sessionID);
-        if (!info) return;
+        const sessionID = event.properties.sessionID;
         const type = event.properties.status.type; // "busy" | "idle" | "retry"
+
+        // --- "Turn done" notification for the main (non-sub) session ---
+        // Mirrors the built-in notifications plugin: arm on busy/retry, fire once on the
+        // following idle, then disarm. Only fires for sessions that are not tracked
+        // subagents (top-level/main sessions).
+        if (!running.has(sessionID)) {
+          if (type === "busy" || type === "retry") {
+            mainArmed.add(sessionID);
+          } else if (type === "idle") {
+            if (mainArmed.has(sessionID)) {
+              mainArmed.delete(sessionID);
+              notifyTurnDone(api).catch(() => {});
+            }
+          }
+        }
+
+        const info = running.get(sessionID);
+        if (!info) return;
         if (type === "busy" || type === "retry") {
           // Start a new counting run on busy/retry; keep accumulated frozen time.
           if (info.status !== "busy" && info.status !== "retry") {
@@ -214,6 +244,31 @@ const plugin: TuiPluginModule = {
       api.event.on("message.part.updated", (event) => {
         const part = event.properties.part;
         if (part.type !== "tool" || part.tool !== "task") return;
+
+        // --- "All subagents done" detection (batch-wide, independent of childID) ---
+        // Track every task tool part's lifecycle keyed by callID so we can tell when a
+        // whole delegation batch drains to zero active parts. Notify once per batch.
+        const status = part.state.status;
+        const prevStatus = taskParts.get(part.callID);
+        taskParts.set(part.callID, status);
+
+        const wasActive = prevStatus === "pending" || prevStatus === "running";
+        const nowActive = status === "pending" || status === "running";
+        if (wasActive && !nowActive) {
+          // A previously-active task just reached a terminal state.
+          activeTaskCount--;
+          if (activeTaskCount === 0) {
+            // Batch drained to zero -> all delegated subagents finished.
+            if (!roundNotified) {
+              roundNotified = true;
+              notifySubagentsDone(api, taskParts.size).catch(() => {});
+            }
+          }
+        } else if (!wasActive && nowActive) {
+          // A brand-new active task appears (start of a new delegation batch).
+          if (activeTaskCount === 0) roundNotified = false;
+          activeTaskCount++;
+        }
 
         // Child session is identified by metadata sessionId/sessionID (state first).
         const childID =
@@ -256,6 +311,7 @@ const plugin: TuiPluginModule = {
     // session.deleted: sub-session is gone.
     unsubs.push(
       api.event.on("session.deleted", (event) => {
+        mainArmed.delete(event.properties.sessionID);
         if (running.delete(event.properties.sessionID)) {
           syncEntries();
         }

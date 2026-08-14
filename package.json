@@ -32,7 +32,7 @@
     "opencode": "^1.0.0"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js",
+    "build": "bun build src/index.ts --outdir dist && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js --external node-notifier --external \"node:*\"",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build"
   },
@@ -41,6 +41,10 @@
     "@opentui/core": "latest",
     "@opentui/solid": "^0.5.1",
     "@types/node": "^24",
+    "@types/node-notifier": "^8.0.5",
     "typescript": "^5"
+  },
+  "dependencies": {
+    "node-notifier": "^10.0.1"
   }
 }
