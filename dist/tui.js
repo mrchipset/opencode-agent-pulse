@@ -34,33 +34,222 @@ async function builtinNotify(api, payload) {
     });
   } catch {}
 }
-async function dispatch(api, payload) {
+async function dispatch(api, payload, gate) {
+  if (gate?.onlyWhenUnfocused && await gate.focused() === true) {
+    return;
+  }
   if (IS_WINDOWS) {
     windowsNotify(payload);
   } else {
     await builtinNotify(api, payload);
   }
 }
-async function notifySubagentsDone(api, count) {
+async function notifySubagentsDone(api, count, gate) {
   await dispatch(api, {
     title: "opencode-agent-pulse",
     message: count > 1 ? `全部 ${count} 个子 agent 已完成` : "子 agent 已完成",
     sound: { name: "subagent_done" }
-  });
+  }, gate);
 }
-async function notifyTurnDone(api) {
+async function notifyTurnDone(api, gate) {
   await dispatch(api, {
     title: "opencode-agent-pulse",
     message: "本轮对话已完成",
     sound: { name: "done" }
-  });
+  }, gate);
 }
-async function notifyInterviewInput(api, kind, detail) {
+async function notifyInterviewInput(api, kind, detail, gate) {
   await dispatch(api, {
     title: "opencode-agent-pulse",
     message: kind === "permission" ? detail ? `需要权限确认: ${detail}` : "主会话需要权限确认" : detail ? `需要回答: ${detail}` : "主会话需要回答询问",
     sound: kind === "permission" ? { name: "permission" } : { name: "question" }
+  }, gate);
+}
+
+// src/windows-focus.ts
+import { spawn } from "node:child_process";
+var IS_WINDOWS2 = process.platform === "win32";
+var PROCESSENTRY32W_SIZE = 568;
+var OFFSET_TH32_PROCESS_ID = 8;
+var OFFSET_TH32_PARENT_PROCESS_ID = 32;
+var backend = "none";
+var ancestors = new Set;
+var ffiForegroundPid;
+var status = { backend: "none", ancestorCount: 0 };
+function getFocusStatus() {
+  return status;
+}
+function runPowerShell(script, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let out = "";
+    let child;
+    try {
+      child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch {
+      resolve("");
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {}
+      resolve("");
+    }, timeoutMs);
+    child.stdout?.on("data", (chunk) => {
+      out += chunk.toString();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve("");
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      resolve(out.trim());
+    });
   });
+}
+async function ancestorsViaPowerShell() {
+  const selfPid = process.pid;
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$pidChain = @(${selfPid})
+$cur = ${selfPid}
+for ($i = 0; $i -lt 32 -and $cur -gt 0; $i++) {
+  $p = Get-CimInstance Win32_Process -Filter "ProcessId=$cur"
+  if (-not $p) { break }
+  $next = $p.ParentProcessId
+  if ($next -eq $cur -or $next -le 0) { break }
+  $cur = $next
+  $pidChain += $cur
+}
+$pidChain -join ','
+`;
+  const result = await runPowerShell(script);
+  const pids = new Set;
+  for (const part of result.split(",")) {
+    const n = parseInt(part, 10);
+    if (Number.isFinite(n) && n > 0)
+      pids.add(n);
+  }
+  return pids;
+}
+async function foregroundPidViaPowerShell() {
+  const script = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PulseFocus {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+}
+'@
+$h = [PulseFocus]::GetForegroundWindow()
+$p = [uint32]0
+[void][PulseFocus]::GetWindowThreadProcessId($h, [ref]$p)
+$p
+`;
+  const result = await runPowerShell(script);
+  const n = parseInt(result, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+async function initFfiBackend() {
+  try {
+    const { dlopen, ptr } = await import("bun:ffi");
+    const user32 = dlopen("user32.dll", {
+      GetForegroundWindow: { args: [], returns: "ptr" },
+      GetWindowThreadProcessId: { args: ["ptr", "ptr"], returns: "u32" }
+    });
+    const kernel32 = dlopen("kernel32.dll", {
+      GetCurrentProcessId: { args: [], returns: "u32" },
+      CreateToolhelp32Snapshot: { args: ["u32", "u32"], returns: "ptr" },
+      Process32FirstW: { args: ["ptr", "ptr"], returns: "i32" },
+      Process32NextW: { args: ["ptr", "ptr"], returns: "i32" },
+      CloseHandle: { args: ["ptr"], returns: "i32" }
+    });
+    const TH32CS_SNAPPROCESS = 2;
+    const snapshot = kernel32.symbols.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (!snapshot) {
+      return false;
+    }
+    try {
+      const entry = new Uint8Array(PROCESSENTRY32W_SIZE);
+      const view = new DataView(entry.buffer);
+      view.setUint32(0, PROCESSENTRY32W_SIZE, true);
+      const parent = new Map;
+      let ok = kernel32.symbols.Process32FirstW(snapshot, ptr(entry));
+      while (ok) {
+        const pid = view.getUint32(OFFSET_TH32_PROCESS_ID, true);
+        const ppid = view.getUint32(OFFSET_TH32_PARENT_PROCESS_ID, true);
+        if (pid !== 0)
+          parent.set(pid, ppid);
+        ok = kernel32.symbols.Process32NextW(snapshot, ptr(entry));
+      }
+      const self = kernel32.symbols.GetCurrentProcessId();
+      let current = self;
+      for (let depth = 0;depth < 32 && current; depth++) {
+        ancestors.add(current);
+        const next = parent.get(current);
+        if (next === undefined || next === current)
+          break;
+        current = next;
+      }
+    } finally {
+      kernel32.symbols.CloseHandle(snapshot);
+    }
+    ffiForegroundPid = () => {
+      const hwnd = user32.symbols.GetForegroundWindow();
+      if (!hwnd)
+        return;
+      const pidBuf = new Uint32Array(1);
+      user32.symbols.GetWindowThreadProcessId(hwnd, ptr(pidBuf));
+      return pidBuf[0];
+    };
+    status = { backend: "ffi", ancestorCount: ancestors.size };
+    return ancestors.size > 0;
+  } catch (error) {
+    status = { ...status, lastError: String(error) };
+    return false;
+  }
+}
+var initPromise;
+function ensureWindowsFocusInit() {
+  if (!IS_WINDOWS2)
+    return;
+  initPromise ??= (async () => {
+    if (await initFfiBackend()) {
+      backend = "ffi";
+      status = { ...status, backend: "ffi" };
+      return;
+    }
+    ancestors = await ancestorsViaPowerShell();
+    if (ancestors.size > 0) {
+      backend = "powershell";
+      status = { backend: "powershell", ancestorCount: ancestors.size };
+    } else {
+      backend = "none";
+      status = { backend: "none", ancestorCount: 0, lastError: "no ancestor chain" };
+    }
+  })();
+}
+async function isTerminalFocused() {
+  if (!IS_WINDOWS2 || backend === "none") {
+    return;
+  }
+  if (backend === "ffi" && ffiForegroundPid) {
+    const foreground2 = ffiForegroundPid();
+    const result2 = foreground2 !== undefined ? ancestors.has(foreground2) : undefined;
+    status = { ...status, lastForegroundPid: foreground2, lastResult: result2 };
+    return result2;
+  }
+  const foreground = await foregroundPidViaPowerShell();
+  const result = foreground !== undefined ? ancestors.has(foreground) : undefined;
+  status = { ...status, lastForegroundPid: foreground, lastResult: result };
+  return result;
 }
 
 // src/tui.ts
@@ -127,6 +316,8 @@ var plugin = {
     const notifySubagents = notifCfg?.subagents ?? true;
     const notifyMainSession = notifCfg?.mainSession ?? true;
     const notifyInterview = notifCfg?.interview ?? true;
+    const notifyOnlyWhenUnfocused = notifCfg?.onlyWhenUnfocused ?? false;
+    const showFocus = options?.sidebar?.showFocus ?? false;
     const running = new Map;
     const [runningEntries, setRunningEntries] = createSignal([]);
     const [collapsed, setCollapsed] = createSignal(false);
@@ -136,6 +327,28 @@ var plugin = {
     const mainArmed = new Set;
     const pendingQuestions = new Set;
     const pendingPermissions = new Map;
+    ensureWindowsFocusInit();
+    let focused;
+    const [focusDiag, setFocusDiag] = createSignal(getFocusStatus());
+    const refreshFocusDiag = () => setFocusDiag(getFocusStatus());
+    const onFocus = () => {
+      focused = true;
+      refreshFocusDiag();
+    };
+    const onBlur = () => {
+      focused = false;
+      refreshFocusDiag();
+    };
+    api.renderer.on("focus", onFocus);
+    api.renderer.on("blur", onBlur);
+    const notifyGate = {
+      onlyWhenUnfocused: notifyOnlyWhenUnfocused,
+      focused: async () => {
+        const win = await isTerminalFocused();
+        refreshFocusDiag();
+        return win ?? focused;
+      }
+    };
     const syncEntries = () => setRunningEntries([...running.entries()]);
     const unsubs = [];
     api.client.session.list().then((result) => {
@@ -176,7 +389,7 @@ var plugin = {
           if (mainArmed.has(sessionID)) {
             mainArmed.delete(sessionID);
             if (notifyMainSession) {
-              notifyTurnDone(api).catch(() => {});
+              notifyTurnDone(api, notifyGate).catch(() => {});
             }
           }
         }
@@ -203,18 +416,18 @@ var plugin = {
       const part = event.properties.part;
       if (part.type !== "tool" || part.tool !== "task")
         return;
-      const status = part.state.status;
+      const status2 = part.state.status;
       const prevStatus = taskParts.get(part.callID);
-      taskParts.set(part.callID, status);
+      taskParts.set(part.callID, status2);
       const wasActive = prevStatus === "pending" || prevStatus === "running";
-      const nowActive = status === "pending" || status === "running";
+      const nowActive = status2 === "pending" || status2 === "running";
       if (wasActive && !nowActive) {
         activeTaskCount--;
         if (activeTaskCount === 0) {
           if (!roundNotified) {
             roundNotified = true;
             if (notifySubagents) {
-              notifySubagentsDone(api, taskParts.size).catch(() => {});
+              notifySubagentsDone(api, taskParts.size, notifyGate).catch(() => {});
             }
           }
         }
@@ -274,7 +487,7 @@ var plugin = {
         return;
       pendingQuestions.add(id);
       const first = questions?.[0];
-      notifyInterviewInput(api, "question", first?.question || first?.header).catch(() => {});
+      notifyInterviewInput(api, "question", first?.question || first?.header, notifyGate).catch(() => {});
     }));
     unsubs.push(api.event.on("question.replied", (event) => {
       pendingQuestions.delete(event.properties.requestID);
@@ -289,7 +502,7 @@ var plugin = {
         return;
       const timer = setTimeout(() => {
         if (pendingPermissions.delete(id)) {
-          notifyInterviewInput(api, "permission", permission).catch(() => {});
+          notifyInterviewInput(api, "permission", permission, notifyGate).catch(() => {});
         }
       }, PERMISSION_NOTIFY_DELAY_MS);
       pendingPermissions.set(id, timer);
@@ -315,6 +528,8 @@ var plugin = {
     }, 1000);
     api.lifecycle.onDispose(() => {
       clearInterval(ticker);
+      api.renderer.off("focus", onFocus);
+      api.renderer.off("blur", onBlur);
       for (const timer of pendingPermissions.values()) {
         clearTimeout(timer);
       }
@@ -339,6 +554,19 @@ var plugin = {
           if (isCollapsed) {
             return box({ width: "100%", flexDirection: "column" }, [header]);
           }
+          const focusLine = (() => {
+            if (!showFocus)
+              return [];
+            const diag = focusDiag();
+            const flag = diag.lastResult === true ? "●focused" : diag.lastResult === false ? "○blurred" : "?unknown";
+            const src = diag.lastForegroundPid !== undefined ? ` fg=${diag.lastForegroundPid}` : "";
+            const err = diag.lastError ? ` err=${diag.lastError}` : "";
+            return [
+              text({ fg: theme.textMuted }, [
+                `  focus[${diag.backend}${diag.ancestorCount ? `:${diag.ancestorCount}` : ""}] ${flag}${src}${err}`
+              ])
+            ];
+          })();
           const rows = entries.map(([sessionID, info]) => {
             const isActive = info.status === "busy";
             const statusColor = isActive ? theme.success : info.status === "retry" ? theme.warning : theme.textMuted;
@@ -358,7 +586,7 @@ var plugin = {
               text({ fg: theme.textMuted }, [` ${formatDuration(entryElapsed(info))}`])
             ]);
           });
-          return box({ width: "100%", flexDirection: "column" }, [header, ...rows]);
+          return box({ width: "100%", flexDirection: "column" }, [header, ...focusLine, ...rows]);
         }
       }
     });

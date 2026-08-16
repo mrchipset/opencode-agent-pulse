@@ -34,6 +34,26 @@ interface NotifyPayload {
   sound: TuiAttentionSound;
 }
 
+/**
+ * Optional focus gate applied before dispatching a notification. Lets the user opt into
+ * "notify only when the terminal window is unfocused" so notifications don't fire while
+ * they are actively watching the TUI.
+ *
+ * The gate is evaluated on every dispatch (not once at setup) because the deferred
+ * permission notification is sent from a timer and the current focus state must be read
+ * at that moment.
+ */
+export type NotifyGate = {
+  /** When true, suppress the notification while the terminal is focused. */
+  onlyWhenUnfocused: boolean;
+  /** Current terminal focus state; `undefined` when unknown (e.g. the terminal does not
+   *  report focus events — Windows Terminal is a known case). Unknown focus degrades to
+   *  dispatching so an opted-in notification is never silently lost. Read lazily on each
+   *  dispatch because the deferred permission notification fires from a timer. May be
+   *  async (the Windows fallback queries the foreground window via PowerShell). */
+  focused: () => boolean | undefined | Promise<boolean | undefined>;
+};
+
 function windowsNotify(payload: NotifyPayload): void {
   // node-notifier is marked external in the build (package.json) so it resolves from
   // node_modules at runtime rather than being bundled. On Windows it posts a real
@@ -74,7 +94,12 @@ async function builtinNotify(api: Api, payload: NotifyPayload): Promise<void> {
   }
 }
 
-async function dispatch(api: Api, payload: NotifyPayload): Promise<void> {
+async function dispatch(api: Api, payload: NotifyPayload, gate?: NotifyGate): Promise<void> {
+  if (gate?.onlyWhenUnfocused && (await gate.focused()) === true) {
+    // Terminal is focused -> the user is watching, suppress the notification.
+    // Unknown focus (no focus events, e.g. Windows Terminal) still dispatches.
+    return;
+  }
   if (IS_WINDOWS) {
     windowsNotify(payload);
   } else {
@@ -83,21 +108,29 @@ async function dispatch(api: Api, payload: NotifyPayload): Promise<void> {
 }
 
 /** Notify that a batch of subagents finished. */
-export async function notifySubagentsDone(api: Api, count: number): Promise<void> {
-  await dispatch(api, {
-    title: "opencode-agent-pulse",
-    message: count > 1 ? `全部 ${count} 个子 agent 已完成` : "子 agent 已完成",
-    sound: { name: "subagent_done" },
-  });
+export async function notifySubagentsDone(api: Api, count: number, gate?: NotifyGate): Promise<void> {
+  await dispatch(
+    api,
+    {
+      title: "opencode-agent-pulse",
+      message: count > 1 ? `全部 ${count} 个子 agent 已完成` : "子 agent 已完成",
+      sound: { name: "subagent_done" },
+    },
+    gate,
+  );
 }
 
 /** Notify that the current turn (main-agent round) has finished. */
-export async function notifyTurnDone(api: Api): Promise<void> {
-  await dispatch(api, {
-    title: "opencode-agent-pulse",
-    message: "本轮对话已完成",
-    sound: { name: "done" },
-  });
+export async function notifyTurnDone(api: Api, gate?: NotifyGate): Promise<void> {
+  await dispatch(
+    api,
+    {
+      title: "opencode-agent-pulse",
+      message: "本轮对话已完成",
+      sound: { name: "done" },
+    },
+    gate,
+  );
 }
 
 /** What kind of user interaction is blocking the main session. */
@@ -108,19 +141,23 @@ export type InterviewKind = "question" | "permission";
  * the `question` tool asking the user something, or a permission/approval prompt).
  * These are the two ways an agent turn is suspended mid-run on user interaction.
  */
-export async function notifyInterviewInput(api: Api, kind: InterviewKind, detail?: string): Promise<void> {
-  await dispatch(api, {
-    title: "opencode-agent-pulse",
-    message:
-      kind === "permission"
-        ? detail
-          ? `需要权限确认: ${detail}`
-          : "主会话需要权限确认"
-        : detail
-          ? `需要回答: ${detail}`
-          : "主会话需要回答询问",
-    sound: kind === "permission" ? { name: "permission" } : { name: "question" },
-  });
+export async function notifyInterviewInput(api: Api, kind: InterviewKind, detail?: string, gate?: NotifyGate): Promise<void> {
+  await dispatch(
+    api,
+    {
+      title: "opencode-agent-pulse",
+      message:
+        kind === "permission"
+          ? detail
+            ? `需要权限确认: ${detail}`
+            : "主会话需要权限确认"
+          : detail
+            ? `需要回答: ${detail}`
+            : "主会话需要回答询问",
+      sound: kind === "permission" ? { name: "permission" } : { name: "question" },
+    },
+    gate,
+  );
 }
 
 /** In-app toast fallback (works on every platform). */

@@ -55,6 +55,8 @@ Both notifications are enabled by default and can be toggled via plugin options 
 | `notifications.subagents` | `true` | Notify when all delegated subagents of a batch have finished |
 | `notifications.mainSession` | `true` | Notify when the main (top-level) session finishes a conversation turn |
 | `notifications.interview` | `true` | Notify when the main session is blocked waiting for user input (question / permission approval) |
+| `notifications.onlyWhenUnfocused` | `false` | Only send notifications while the terminal window is unfocused (suppresses them while you are watching). On non-Windows terminals it relies on DEC 1004 focus reporting via the renderer. On Windows, where DEC 1004 blur events are unreliable, it instead checks the Win32 foreground window (`GetForegroundWindow`) against the plugin's process ancestry — the terminal is focused when the foreground window belongs to an ancestor process. When focus cannot be determined (Win32 unavailable), notifications are sent as usual so nothing is silently lost |
+| `sidebar.showFocus` | `false` | Show a small diagnostic line in the sidebar section with the current focus state (`focus[backend] ●focused / ○blurred fg=<pid>`) — handy for verifying the `onlyWhenUnfocused` gate |
 
 ## Usage
 

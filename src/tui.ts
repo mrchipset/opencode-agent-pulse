@@ -3,7 +3,9 @@ import type { Session, ToolPart } from "@opencode-ai/sdk/v2";
 import { createElement, insert, setProp } from "@opentui/solid";
 import type { JSX } from "@opentui/solid";
 import { createSignal } from "solid-js";
+import type { NotifyGate } from "./notification";
 import { notifyInterviewInput, notifySubagentsDone, notifyTurnDone } from "./notification";
+import { ensureWindowsFocusInit, getFocusStatus, isTerminalFocused } from "./windows-focus";
 
 /**
  * Sidebar widget that live-tracks running subagents (sub-sessions).
@@ -130,11 +132,20 @@ const plugin: TuiPluginModule = {
   tui: async (api, options, _meta) => {
     // Notification toggles from plugin options (registered via the tuple form:
     // ["opencode-agent-pulse", { "notifications": { ... } }]).
-    const notifCfg = (options as { notifications?: { subagents?: boolean; mainSession?: boolean; interview?: boolean } } | undefined)
-      ?.notifications;
+    const notifCfg = (options as
+      | { notifications?: { subagents?: boolean; mainSession?: boolean; interview?: boolean; onlyWhenUnfocused?: boolean } }
+      | undefined)?.notifications;
     const notifySubagents = notifCfg?.subagents ?? true;
     const notifyMainSession = notifCfg?.mainSession ?? true;
     const notifyInterview = notifCfg?.interview ?? true;
+    // Opt-in "notify only when the terminal is unfocused". The host tracks focus via
+    // renderer "focus"/"blur" events (DEC 1004 focus reporting); we mirror the same
+    // source through `api.renderer`. Defaults to false: notifications fire regardless
+    // of focus, preserving the current behavior.
+    const notifyOnlyWhenUnfocused = notifCfg?.onlyWhenUnfocused ?? false;
+    // Opt-in debug display: show the current focus state (focused/blurred + backend) as
+    // a small line in the sidebar. Defaults to false: hidden unless explicitly enabled.
+    const showFocus = (options as { sidebar?: { showFocus?: boolean } } | undefined)?.sidebar?.showFocus ?? false;
     // Source of truth for lookups (sessionID -> info). Rendered via `runningEntries`
     // signal below so solid reactivity re-renders the slot on every change.
     const running = new Map<string, SubagentInfo>();
@@ -162,6 +173,42 @@ const plugin: TuiPluginModule = {
     // Permission requests awaiting a reply. Values hold the deferred-notification timer
     // so it can be cancelled when a reply arrives (see the permission.asked handler).
     const pendingPermissions = new Map<string, ReturnType<typeof setTimeout>>();
+
+    // --- Terminal focus tracking ---
+    // `undefined` = unknown (e.g. Windows Terminal never reports DEC 1004 focus events,
+    // so no "focus"/"blur" will ever fire and notifications stay enabled there). Only a
+    // definitive "focused" state suppresses notifications when the option is enabled.
+    //
+    // On Windows the renderer's DEC 1004 blur event often never arrives (focus-in fires
+    // at startup, focus-out is dropped), which would permanently set `focused = true`.
+    // As a reliable fallback we query the Win32 foreground window via `bun:ffi` instead:
+    // the terminal hosting us is an ancestor process, so "foreground window PID is in our
+    // ancestor chain" means the terminal has focus. Renderer events remain the source on
+    // non-Windows and as a secondary signal everywhere else.
+    ensureWindowsFocusInit();
+    let focused: boolean | undefined;
+    // Debug surface: expose the focus backend + last result in the sidebar so we can
+    // verify the gate without relying on file logs (which may be blocked in the runtime).
+    const [focusDiag, setFocusDiag] = createSignal(getFocusStatus());
+    const refreshFocusDiag = () => setFocusDiag(getFocusStatus());
+    const onFocus = () => {
+      focused = true;
+      refreshFocusDiag();
+    };
+    const onBlur = () => {
+      focused = false;
+      refreshFocusDiag();
+    };
+    api.renderer.on("focus", onFocus);
+    api.renderer.on("blur", onBlur);
+    const notifyGate: NotifyGate = {
+      onlyWhenUnfocused: notifyOnlyWhenUnfocused,
+      focused: async () => {
+        const win = await isTerminalFocused();
+        refreshFocusDiag();
+        return win ?? focused;
+      },
+    };
 
     const syncEntries = () => setRunningEntries([...running.entries()]);
 
@@ -229,7 +276,7 @@ const plugin: TuiPluginModule = {
             if (mainArmed.has(sessionID)) {
               mainArmed.delete(sessionID);
               if (notifyMainSession) {
-                notifyTurnDone(api).catch(() => {});
+                notifyTurnDone(api, notifyGate).catch(() => {});
               }
             }
           }
@@ -280,7 +327,7 @@ const plugin: TuiPluginModule = {
             if (!roundNotified) {
               roundNotified = true;
               if (notifySubagents) {
-                notifySubagentsDone(api, taskParts.size).catch(() => {});
+                notifySubagentsDone(api, taskParts.size, notifyGate).catch(() => {});
               }
             }
           }
@@ -369,7 +416,7 @@ const plugin: TuiPluginModule = {
         if (!notifyInterview || running.has(sessionID) || pendingQuestions.has(id)) return;
         pendingQuestions.add(id);
         const first = questions?.[0];
-        notifyInterviewInput(api, "question", first?.question || first?.header).catch(() => {});
+        notifyInterviewInput(api, "question", first?.question || first?.header, notifyGate).catch(() => {});
       }),
     );
     unsubs.push(
@@ -399,7 +446,7 @@ const plugin: TuiPluginModule = {
         const timer = setTimeout(() => {
           // Still pending after the window -> the user has to approve it manually.
           if (pendingPermissions.delete(id)) {
-            notifyInterviewInput(api, "permission", permission).catch(() => {});
+            notifyInterviewInput(api, "permission", permission, notifyGate).catch(() => {});
           }
         }, PERMISSION_NOTIFY_DELAY_MS);
         pendingPermissions.set(id, timer);
@@ -432,6 +479,8 @@ const plugin: TuiPluginModule = {
 
     api.lifecycle.onDispose(() => {
       clearInterval(ticker);
+      api.renderer.off("focus", onFocus);
+      api.renderer.off("blur", onBlur);
       // Cancel any pending deferred permission notifications.
       for (const timer of pendingPermissions.values()) {
         clearTimeout(timer);
@@ -468,6 +517,21 @@ const plugin: TuiPluginModule = {
             return box({ width: "100%", flexDirection: "column" }, [header]);
           }
 
+          // Focus state display: only rendered when the `sidebar.showFocus` option is
+          // enabled (default hidden). Shows the current focus backend + last result.
+          const focusLine = (() => {
+            if (!showFocus) return [];
+            const diag = focusDiag();
+            const flag = diag.lastResult === true ? "●focused" : diag.lastResult === false ? "○blurred" : "?unknown";
+            const src = diag.lastForegroundPid !== undefined ? ` fg=${diag.lastForegroundPid}` : "";
+            const err = diag.lastError ? ` err=${diag.lastError}` : "";
+            return [
+              text({ fg: theme.textMuted }, [
+                `  focus[${diag.backend}${diag.ancestorCount ? `:${diag.ancestorCount}` : ""}] ${flag}${src}${err}`,
+              ]),
+            ];
+          })();
+
           const rows = entries.map(([sessionID, info]) => {
             const isActive = info.status === "busy";
             const statusColor = isActive ? theme.success : info.status === "retry" ? theme.warning : theme.textMuted;
@@ -492,7 +556,7 @@ const plugin: TuiPluginModule = {
             );
           });
 
-          return box({ width: "100%", flexDirection: "column" }, [header, ...rows]);
+          return box({ width: "100%", flexDirection: "column" }, [header, ...focusLine, ...rows]);
         },
       },
     });

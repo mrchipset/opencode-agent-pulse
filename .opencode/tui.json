@@ -5,7 +5,8 @@
       {
         "notifications": {
           "subagents": false,
-          "mainSession": true
+          "mainSession": true,
+          "onlyWhenUnfocused": true
         }
       }
     ]
