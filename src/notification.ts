@@ -1,4 +1,6 @@
 import type { TuiAttentionSound, TuiPluginApi } from "@opencode-ai/plugin/tui";
+import type { Locale } from "./i18n";
+import { t } from "./i18n";
 
 /**
  * Notification dispatch for opencode-agent-pulse.
@@ -179,12 +181,17 @@ async function dispatch(api: Api, payload: NotifyPayload, gate?: NotifyGate): Pr
 }
 
 /** Notify that a batch of subagents finished. */
-export async function notifySubagentsDone(api: Api, count: number, gate?: NotifyGate): Promise<void> {
+export async function notifySubagentsDone(
+  api: Api,
+  count: number,
+  gate?: NotifyGate,
+  locale: Locale = "en",
+): Promise<void> {
   await dispatch(
     api,
     {
       title: "opencode-agent-pulse",
-      message: count > 1 ? `全部 ${count} 个子 agent 已完成` : "子 agent 已完成",
+      message: t(locale).subagentsDone(count),
       sound: { name: "subagent_done" },
     },
     gate,
@@ -192,12 +199,12 @@ export async function notifySubagentsDone(api: Api, count: number, gate?: Notify
 }
 
 /** Notify that the current turn (main-agent round) has finished. */
-export async function notifyTurnDone(api: Api, gate?: NotifyGate): Promise<void> {
+export async function notifyTurnDone(api: Api, gate?: NotifyGate, locale: Locale = "en"): Promise<void> {
   await dispatch(
     api,
     {
       title: "opencode-agent-pulse",
-      message: "本轮对话已完成",
+      message: t(locale).turnDone,
       sound: { name: "done" },
     },
     gate,
@@ -212,19 +219,22 @@ export type InterviewKind = "question" | "permission";
  * the `question` tool asking the user something, or a permission/approval prompt).
  * These are the two ways an agent turn is suspended mid-run on user interaction.
  */
-export async function notifyInterviewInput(api: Api, kind: InterviewKind, detail?: string, gate?: NotifyGate): Promise<void> {
+export async function notifyInterviewInput(
+  api: Api,
+  kind: InterviewKind,
+  detail?: string,
+  gate?: NotifyGate,
+  locale: Locale = "en",
+): Promise<void> {
+  const messages = t(locale);
   await dispatch(
     api,
     {
       title: "opencode-agent-pulse",
       message:
         kind === "permission"
-          ? detail
-            ? `需要权限确认: ${detail}`
-            : "主会话需要权限确认"
-          : detail
-            ? `需要回答: ${detail}`
-            : "主会话需要回答询问",
+          ? messages.permissionRequired(detail)
+          : messages.questionRequired(detail),
       sound: kind === "permission" ? { name: "permission" } : { name: "question" },
     },
     gate,

@@ -5,6 +5,7 @@ import type { JSX } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import type { NotifyGate } from "./notification";
 import { notifyInterviewInput, notifySubagentsDone, notifyTurnDone } from "./notification";
+import { resolveLocale, t } from "./i18n";
 import { ensureWindowsFocusInit, getFocusStatus, isTerminalFocused } from "./windows-focus";
 
 /**
@@ -144,6 +145,9 @@ const plugin: TuiPluginModule = {
     // source through `api.renderer`. Defaults to false: notifications fire regardless
     // of focus, preserving the current behavior.
     const notifyOnlyWhenUnfocused = notifCfg?.onlyWhenUnfocused ?? false;
+    // Locale for user-facing strings (notification messages + sidebar section title).
+    // Supported: "en" (default) and "zh" (Simplified Chinese).
+    const locale = resolveLocale((options as { locale?: unknown } | undefined)?.locale);
     // Opt-in debug display: show the current focus state (focused/blurred + backend) as
     // a small line in the sidebar. Defaults to false: hidden unless explicitly enabled.
     const showFocus = (options as { sidebar?: { showFocus?: boolean } } | undefined)?.sidebar?.showFocus ?? false;
@@ -277,7 +281,7 @@ const plugin: TuiPluginModule = {
             if (mainArmed.has(sessionID)) {
               mainArmed.delete(sessionID);
               if (notifyMainSession) {
-                notifyTurnDone(api, notifyGate).catch(() => {});
+                notifyTurnDone(api, notifyGate, locale).catch(() => {});
               }
             }
           }
@@ -328,7 +332,7 @@ const plugin: TuiPluginModule = {
             if (!roundNotified) {
               roundNotified = true;
               if (notifySubagents) {
-                notifySubagentsDone(api, taskParts.size, notifyGate).catch(() => {});
+                notifySubagentsDone(api, taskParts.size, notifyGate, locale).catch(() => {});
               }
             }
           }
@@ -417,7 +421,7 @@ const plugin: TuiPluginModule = {
         if (!notifyInterview || running.has(sessionID) || pendingQuestions.has(id)) return;
         pendingQuestions.add(id);
         const first = questions?.[0];
-        notifyInterviewInput(api, "question", first?.question || first?.header, notifyGate).catch(() => {});
+        notifyInterviewInput(api, "question", first?.question || first?.header, notifyGate, locale).catch(() => {});
       }),
     );
     unsubs.push(
@@ -447,7 +451,7 @@ const plugin: TuiPluginModule = {
         const timer = setTimeout(() => {
           // Still pending after the window -> the user has to approve it manually.
           if (pendingPermissions.delete(id)) {
-            notifyInterviewInput(api, "permission", permission, notifyGate).catch(() => {});
+            notifyInterviewInput(api, "permission", permission, notifyGate, locale).catch(() => {});
           }
         }, PERMISSION_NOTIFY_DELAY_MS);
         pendingPermissions.set(id, timer);
@@ -509,7 +513,7 @@ const plugin: TuiPluginModule = {
               onMouseDown: () => setCollapsed((value) => !value),
             },
             [
-              text({ fg: theme.accent }, [`${isCollapsed ? "▸" : "▾"} Subagents`]),
+              text({ fg: theme.accent }, [`${isCollapsed ? "▸" : "▾"} ${t(locale).subagents}`]),
               text({ fg: theme.textMuted }, entries.length > 0 ? [` (${entries.length})`] : []),
             ],
           );

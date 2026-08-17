@@ -7,6 +7,9 @@ An OpenCode TUI plugin that live-displays **running subagents** (sub-agents/task
 - TUI only (OpenCode has no `webview`/`activityBar`; Web/desktop is unsupported).
 - Data sources: `session.created` (identify sub-sessions via `properties.info.parentID`) + `session.status` (busy/idle/retry) + `message.part.updated` (task tool part determines completion) + `session.deleted` / `session.error`.
 - Collapsible sidebar section: a small `▸`/`▾` arrow in the header toggles it on click, matching the built-in MCP/TODO sections (collapse state is driven by a solid signal for reactive re-rendering, same as the built-in sections).
+- Click-through: left-click a row to jump into that sub-session's context view.
+- Notifications (see below): subagent-batch completion, main-session turn completion, and interview waits (question / permission), each independently toggleable, with an optional "only when unfocused" gate and Windows Action Center toast support.
+- Internationalization: notification messages and the section title are localized — English (`en`, default) and Simplified Chinese (`zh`).
 - Multi-plugin stacking: only uses the `sidebar_content` slot (`order: 950`, after OMO-Slim's 900) and never touches the single-winner slots `sidebar_title` / `sidebar_footer`.
 
 ## Installation
@@ -56,7 +59,14 @@ Both notifications are enabled by default and can be toggled via plugin options 
 | `notifications.mainSession` | `true` | Notify when the main (top-level) session finishes a conversation turn |
 | `notifications.interview` | `true` | Notify when the main session is blocked waiting for user input (question / permission approval) |
 | `notifications.onlyWhenUnfocused` | `false` | Only send notifications while the terminal window is unfocused (suppresses them while you are watching). On non-Windows terminals it relies on DEC 1004 focus reporting via the renderer. On Windows, where DEC 1004 blur events are unreliable, it instead checks the Win32 foreground window (`GetForegroundWindow`) against the plugin's process ancestry — the terminal is focused when the foreground window belongs to an ancestor process. When focus cannot be determined (Win32 unavailable), notifications are sent as usual so nothing is silently lost |
+| `locale` | `"en"` | Language for user-facing strings (notification messages + sidebar section title). Supported values: `"en"` and `"zh"` (Simplified Chinese) |
 | `sidebar.showFocus` | `false` | Show a small diagnostic line in the sidebar section with the current focus state (`focus[backend] ●focused / ○blurred fg=<pid>`) — handy for verifying the `onlyWhenUnfocused` gate |
+
+Set the language with the top-level `locale` option (it applies to both notifications and the sidebar title):
+
+```jsonc
+["opencode-agent-pulse", { "locale": "zh" }]   // Chinese notifications + sidebar title
+```
 
 ## Usage
 
@@ -69,7 +79,10 @@ After starting opencode, trigger a subagent delegation (`/agent` or the Task too
 ├── tsconfig.json     # strict + @opentui/solid JSX config
 ├── src/
 │   ├── index.ts      # server plugin (placeholder; TUI side already subscribes, no duplicate state)
-│   └── tui.ts        # TUI plugin: sidebar_content slot + session event subscriptions
+│   ├── tui.ts        # TUI plugin: sidebar_content slot + session event subscriptions
+│   ├── notification.ts  # notification dispatch (non-Windows built-in vs Windows node-notifier toast)
+│   ├── i18n.ts       # locale strings ("en" / "zh")
+│   └── windows-focus.ts  # Windows-only foreground-window focus detection (bun:ffi + PowerShell fallback)
 └── dist/             # bun build output
 ```
 
@@ -77,4 +90,4 @@ After starting opencode, trigger a subagent delegation (`/agent` or the Task too
 
 - The TUI plugin module only does `default export { id, tui }`; it does **not** export `server` from the same module (the loader rejects it).
 - Rendering follows the same approach as OMO-Slim: local `box`/`text` helper functions (wrapping `@opentui/solid`'s `createElement`/`insert`/`setProp`), so no JSX/babel plugin is needed; the build uses `--external @opentui/core --external @opentui/solid --external solid-js` to reuse the instances provided by the host runtime (`solid-js` provides `createSignal`, ensuring the same reactive runtime is shared with the host's `@opentui/solid`).
-- Windows notification limitation: `api.attention.notify` on Windows Terminal by default only plays a sound without showing a system notification (OSC 99/DEC 1004 unsupported, issue #35055); this plugin stays minimal and does not implement notifications.
+- Windows notification delivery: `api.attention.notify` on Windows Terminal only plays a sound without showing a system notification (OSC 99/DEC 1004 unsupported, issue #35055). To still post a real Action Center toast on Windows, this plugin routes through `node-notifier` (which uses the bundled SnoreToast.exe) — see `notification.ts`.
