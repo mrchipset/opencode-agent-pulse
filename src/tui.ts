@@ -117,13 +117,14 @@ function upsertSession(running: Map<string, SubagentInfo>, info: Session): boole
     }
     return changed;
   }
-  running.set(info.id, {
-    agent: info.agent ?? "?",
-    status: "idle",
-    since: Date.now(),
-    frozen: 0,
-    title: info.title || undefined,
-  });
+  // Uncomment this to show all idle subagents
+  // running.set(info.id, {
+  //   agent: info.agent ?? "?",
+  //   status: "idle",
+  //   since: Date.now(),
+  //   frozen: 0,
+  //   title: info.title || undefined,
+  // });
   return true;
 }
 
