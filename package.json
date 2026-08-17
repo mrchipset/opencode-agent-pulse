@@ -42,6 +42,7 @@
     "@opentui/solid": "^0.5.1",
     "@types/node": "^24",
     "@types/node-notifier": "^8.0.5",
+    "sharp": "^0.35.3",
     "typescript": "^5"
   },
   "dependencies": {
