@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bun",
+      "request": "attach",
+      "name": "Attach to opencode (ws://localhost:6499)",
+      "url": "ws://localhost:6499/9ioqptlkki",
+      "internalConsoleOptions": "openOnSessionStart"
+    },
+    {
+      "type": "node",
+      "request": "attach",
+      "name": "Attach 到 Bun 插件",
+      "port": 6499,
+      "restart": true, // 极其重要：允许调试器闪退后自动重连，防止单次退出
+      "timeout": 30000
+    }
+
+  ]
+}

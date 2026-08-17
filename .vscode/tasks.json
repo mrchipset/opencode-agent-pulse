@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Debug: build plugin (with sourcemaps)",
+      "type": "shell",
+      "command": "bun run build",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Debug: start opencode from source (inspector on :6499)",
+      "type": "shell",
+      "command": "bun run --inspect=ws://localhost:6499/ --cwd packages/opencode --conditions=browser ./src/index.ts",
+      "options": {
+        "cwd": "C:/Users/Zouyu/CodeReviews/opencode"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Debug: start opencode from source (inspect-wait, attach before code runs)",
+      "type": "shell",
+      "command": "bun run --inspect-wait=ws://localhost:6499/ --cwd packages/opencode --conditions=browser ./src/index.ts",
+      "options": {
+        "cwd": "C:/Users/Zouyu/CodeReviews/opencode"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Debug: start opencode server only (serve :4096, inspector on :6499)",
+      "type": "shell",
+      "command": "bun run --inspect=ws://localhost:6499/ --cwd packages/opencode ./src/index.ts serve --port 4096",
+      "options": {
+        "cwd": "C:/Users/Zouyu/CodeReviews/opencode"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

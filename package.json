@@ -32,7 +32,7 @@
     "opencode": "^1.0.0"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js --external node-notifier --external \"node:*\"",
+    "build": "bun build src/index.ts --outdir dist --sourcemap=inline && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js --external node-notifier --external \"node:*\" --sourcemap=inline && bun run scripts/fix-sourcemaps.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build"
   },
