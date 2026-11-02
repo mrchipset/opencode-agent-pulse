@@ -1,23 +1,19 @@
-import type { Plugin, Hooks } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode/plugin";
 
 /**
  * Server-side plugin entry.
  *
- * The TUI entry (`./tui`) already subscribes to `session.*` events directly,
- * so the server side deliberately does NOT duplicate state maintenance (see
- * AGENTS.md: "pick one data source on either side; do not duplicate"). This entry exists to give the
- * package a valid `main`/`.` export and a future place to persist a snapshot
- * if cross-restart state recovery is ever needed.
+ * The TUI entry (`./tui`) reads OpenCode 2.x's already-projected session data
+ * (`context.data`), so this package deliberately keeps no duplicate server-side
+ * state. This no-op definition exists so the package still has a valid `main` /
+ * `.` export in the V2 plugin registry; TUI discovery uses the separate
+ * `./tui` export.
  */
-const plugin: Plugin = async () => {
-  return {
-    name: "opencode-agent-pulse",
-    event: async ({ event }) => {
-      // The TUI side already subscribes to session.* events directly; no duplicate maintenance here.
-      // Reserved: if cross-session/remount state recovery is needed, subscribe to session.* here and write a disk snapshot.
-      void event;
-    },
-  } satisfies Hooks & { name: string };
-};
+const plugin = Plugin.define({
+  id: "opencode-agent-pulse",
+  setup() {
+    // Read-only TUI plugin: nothing to hook on the server.
+  },
+});
 
 export default plugin;

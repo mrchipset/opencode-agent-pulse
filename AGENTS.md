@@ -1,5 +1,22 @@
 # AGENTS.md — opencode-agent-pulse plugin project
 
+> **Branch `dev_2.0` (OpenCode 2.x).** The V1 API descriptions below are kept for history.
+> This branch targets OpenCode 2.2.5 and `@opencode/plugin@^2.2.5`:
+>
+> - TUI entry: `export default Plugin.define({ id, setup })` from `@opencode/plugin/tui`
+>   (not the V1 `default export { id, tui }`).
+> - Data: `context.data` (`session.list/get/root/family/status`, `data.on("session.execution.*")`,
+>   `form.*`, `permission.*`, `session.retry.scheduled`).
+> - UI: `context.ui.slot({ prepend: "sidebar.content", render })`, `context.ui.router.navigate`,
+>   `context.ui.toast.show`, `context.storage.store`.
+> - Rendering: Solid JSX (`@opentui/solid`) in `src/tui.tsx`; `context.theme` is a
+>   `@opencode/theme/tui` `ResolvedTheme` (`theme.text.base`, `theme.text.muted`,
+>   `theme.text.feedback.*.base`).
+> - Package exports: `.` → no-op V2 server plugin (`dist/index.js`), `./tui` → `dist/tui.js`.
+>
+> See `README.md` and `src/tui.tsx` for the current implementation; `scripts/smoke-2.0.ts`
+> and `scripts/render-smoke.ts` are the V2 verification harnesses.
+
 This file is used to build this plugin from scratch in a **standalone working directory**. The directory you receive is an empty/new bun project directory; implement it fully per this file.
 
 ## Project overview

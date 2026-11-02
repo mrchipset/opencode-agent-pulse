@@ -1,27 +1,25 @@
-import type { TuiAttentionSound, TuiPluginApi } from "@opencode-ai/plugin/tui";
+import type { AttentionSound, Context } from "@opencode/plugin/tui/context";
 import type { Locale } from "./i18n";
 import { t } from "./i18n";
 
 /**
  * Notification dispatch for opencode-agent-pulse.
  *
- * Two delivery channels, selected by platform:
+ * One host channel plus a Windows fallback:
  *
- *   - Non-Windows: use the built-in `api.attention.notify()` (macOS iTerm2/Ghostty and
- *     Linux kitty/foot implement the OSC 9/99 protocol this relies on). Supports both
- *     a system notification and a sound.
- *   - Windows: Windows Terminal does NOT implement the OSC 99 protocol + DEC 1004 focus
- *     tracking that `api.attention.notify`'s notification path depends on (known issue
- *     #35055), so the system notification is silently dropped. As a workaround we route
- *     through `node-notifier`, which on Windows shells out to the bundled SnoreToast.exe
- *     to post a real Action Center toast. (The built-in sound is unaffected, but on
- *     Windows the TUI sound and the toast are delivered independently.)
+ *   - Every platform calls `context.attention.notify()` first, so the host's attention
+ *     enable/disable policy and sound configuration apply. macOS iTerm2/Ghostty and
+ *     Linux kitty/foot implement the OSC 9/99 protocol used for system notifications.
+ *   - Windows Terminal does NOT implement OSC 99 + DEC 1004 (known issue #35055), so the
+ *     host reports `notification: false` while still playing the sound. In that case we
+ *     post a real Action Center toast through `node-notifier` (bundled SnoreToast.exe).
+ *     If attention is globally disabled we skip the fallback too.
  *
  * All functions are best-effort: failures are swallowed so a notification problem never
  * breaks the plugin.
  */
 
-type Api = Pick<TuiPluginApi, "attention" | "ui">;
+type Api = Pick<Context, "attention" | "ui">;
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -86,7 +84,7 @@ interface NotifyPayload {
   title: string;
   message: string;
   /** Sound used on the non-Windows path (`api.attention.notify`). */
-  sound: TuiAttentionSound;
+  sound: AttentionSound;
 }
 
 /**
@@ -109,54 +107,56 @@ export type NotifyGate = {
   focused: () => boolean | undefined | Promise<boolean | undefined>;
 };
 
+// Decode the embedded OpenCode PNG once per process and reuse it for every toast.
+// A stable path also avoids leaking one temp file per notification if the
+// node-notifier callback never fires.
+let windowsIcon: Promise<string | undefined> | undefined;
+function ensureWindowsIcon(): Promise<string | undefined> {
+  windowsIcon ??= (async () => {
+    try {
+      const { writeFile } = await import("node:fs/promises");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const iconPath = path.join(os.tmpdir(), `opencode-pulse-${process.pid}.png`);
+      await writeFile(iconPath, Buffer.from(OPENCODE_ICON_PNG_B64, "base64"));
+      return iconPath;
+    } catch {
+      // best-effort; fall back to no icon if the temp file could not be written
+      return undefined;
+    }
+  })();
+  return windowsIcon;
+}
+
 async function windowsNotify(payload: NotifyPayload): Promise<void> {
-  // node-notifier is marked external in the build (package.json) so it resolves from
+  // node-notifier is marked external in the build so it resolves from
   // node_modules at runtime rather than being bundled. On Windows it posts a real
   // Action Center toast via the bundled SnoreToast.exe. Dynamic import keeps the
   // module load from failing the whole plugin if node-notifier is unavailable.
-  import("node-notifier")
-    .then(async (mod) => {
-      // node-notifier's Windows branch expects a file path (not a data URL) for `icon`,
-      // so decode the embedded PNG to a temp file first.
-      let iconPath: string | undefined;
-      try {
-        const { writeFile } = await import("node:fs/promises");
-        const os = await import("node:os");
-        const path = await import("node:path");
-        iconPath = path.join(os.tmpdir(), `opencode-pulse-${process.pid}-${Date.now()}.png`);
-        await writeFile(iconPath, Buffer.from(OPENCODE_ICON_PNG_B64, "base64"));
-      } catch {
-        // best-effort; fall back to no icon if the temp file could not be written
-        iconPath = undefined;
-      }
-
-      const notifier = (mod as { default?: unknown }).default ?? mod;
-      (notifier as { notify: (opts: unknown, cb: (err: Error | null, response: string) => void) => void }).notify(
-        {
-          title: payload.title,
-          message: payload.message,
-          appID: WINDOWS_APP_ID,
-          ...(iconPath ? { icon: iconPath } : {}),
-          sound: true,
-        },
-        () => {
-          // best-effort; remove the temp icon file once the toast is dispatched
-          if (iconPath) {
-            void import("node:fs/promises")
-              .then(({ unlink }) => unlink(iconPath))
-              .catch(() => {});
-          }
-        },
-      );
-    })
-    .catch(() => {
-      // best-effort
-    });
+  try {
+    const mod = await import("node-notifier");
+    const iconPath = await ensureWindowsIcon();
+    const notifier = (mod as { default?: unknown }).default ?? mod;
+    (notifier as { notify: (opts: unknown, cb: (err: Error | null, response: string) => void) => void }).notify(
+      {
+        title: payload.title,
+        message: payload.message,
+        appID: WINDOWS_APP_ID,
+        ...(iconPath ? { icon: iconPath } : {}),
+        // The host attention channel already plays the configured sound; the
+        // Windows fallback only needs to supply the missing system toast.
+        sound: false,
+      },
+      () => {},
+    );
+  } catch {
+    // best-effort; a failed toast must never break the plugin
+  }
 }
 
-async function builtinNotify(api: Api, payload: NotifyPayload): Promise<void> {
+async function builtinNotify(api: Api, payload: NotifyPayload) {
   try {
-    await api.attention.notify({
+    return await api.attention.notify({
       title: payload.title,
       message: payload.message,
       notification: { when: "always" },
@@ -164,6 +164,7 @@ async function builtinNotify(api: Api, payload: NotifyPayload): Promise<void> {
     });
   } catch {
     // best-effort; a failed notification must never break the plugin
+    return undefined;
   }
 }
 
@@ -173,10 +174,17 @@ async function dispatch(api: Api, payload: NotifyPayload, gate?: NotifyGate): Pr
     // Unknown focus (no focus events, e.g. Windows Terminal) still dispatches.
     return;
   }
-  if (IS_WINDOWS) {
+  // Let the host apply its attention policy (enabled/disabled, sound, focus)
+  // everywhere, including Windows. On Windows the notification channel is
+  // silently dropped by unsupported terminals, so fall back to a real toast.
+  const result = await builtinNotify(api, payload);
+  if (
+    IS_WINDOWS &&
+    result &&
+    result.notification === false &&
+    result.skipped !== "attention_disabled"
+  ) {
     await windowsNotify(payload);
-  } else {
-    await builtinNotify(api, payload);
   }
 }
 
@@ -244,7 +252,7 @@ export async function notifyInterviewInput(
 /** In-app toast fallback (works on every platform). */
 export function toast(api: Api, message: string): void {
   try {
-    api.ui.toast({ variant: "info", title: "opencode-agent-pulse", message });
+    api.ui.toast.show({ variant: "info", title: "opencode-agent-pulse", message });
   } catch {
     // best-effort
   }

@@ -1,6 +1,6 @@
 {
   "name": "opencode-agent-pulse",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "OpenCode TUI plugin that live-displays running subagents in the sidebar with busy/idle status, elapsed time, and click-through to the sub-session context.",
   "license": "MIT",
@@ -29,23 +29,27 @@
     "LICENSE"
   ],
   "engines": {
-    "opencode": "^1.0.0"
+    "opencode": "^2.0.0"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --sourcemap=inline && bun build src/tui.ts --outfile dist/tui.js --external @opentui/core --external @opentui/solid --external solid-js --external node-notifier --external \"node:*\" --sourcemap=inline && bun run scripts/fix-sourcemaps.ts",
+    "build": "bun run scripts/build.ts && bun run scripts/fix-sourcemaps.ts",
     "typecheck": "tsc --noEmit",
+    "smoke": "bun run scripts/smoke-2.0.ts && bun --preload @opentui/solid/preload scripts/render-smoke.ts",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.9",
-    "@opentui/core": "latest",
-    "@opentui/solid": "^0.5.1",
+    "@opencode/plugin": "^2.2.5",
+    "@opencode/theme": "^2.2.5",
+    "@opentui/core": "^0.8.1",
+    "@opentui/solid": "^0.8.1",
     "@types/node": "^24",
     "@types/node-notifier": "^8.0.5",
     "sharp": "^0.35.3",
+    "solid-js": "^1.9.18",
     "typescript": "^5"
   },
   "dependencies": {
     "node-notifier": "^10.0.1"
-  }
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }
