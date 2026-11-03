@@ -24,6 +24,10 @@ export interface Messages {
   permissionRequired: (detail?: string) => string;
   /** Notification when the main session needs an answer to a question. */
   questionRequired: (detail?: string) => string;
+  /** Notification when a main-session execution fails. */
+  sessionError: (detail?: string) => string;
+  /** Notification when a subagent execution fails. */
+  subagentError: (detail?: string) => string;
 }
 
 const dictionaries: Record<Locale, Messages> = {
@@ -36,6 +40,8 @@ const dictionaries: Record<Locale, Messages> = {
       detail ? `Permission required: ${detail}` : "Main session requires permission",
     questionRequired: (detail) =>
       detail ? `Answer required: ${detail}` : "Main session requires an answer",
+    sessionError: (detail) => (detail ? `Session failed: ${detail}` : "Session failed"),
+    subagentError: (detail) => (detail ? `Subagent failed: ${detail}` : "Subagent failed"),
   },
   zh: {
     subagents: "子 agent",
@@ -46,6 +52,8 @@ const dictionaries: Record<Locale, Messages> = {
       detail ? `需要权限确认: ${detail}` : "主会话需要权限确认",
     questionRequired: (detail) =>
       detail ? `需要回答: ${detail}` : "主会话需要回答询问",
+    sessionError: (detail) => (detail ? `会话执行失败: ${detail}` : "会话执行失败"),
+    subagentError: (detail) => (detail ? `子 agent 执行失败: ${detail}` : "子 agent 执行失败"),
   },
 };
 

@@ -224,14 +224,25 @@ export function ensureWindowsFocusInit(): void {
  * belongs to a different process, undefined when the check is unavailable.
  */
 export async function isTerminalFocused(): Promise<boolean | undefined> {
-  if (!IS_WINDOWS || backend === "none") {
+  if (!IS_WINDOWS) {
+    return undefined;
+  }
+  // The first dispatch can race the async init (dynamic import / PowerShell walk);
+  // wait for it so the very first notification is gated as well.
+  if (initPromise) await initPromise;
+  if (backend === "none") {
     return undefined;
   }
   if (backend === "ffi" && ffiForegroundPid) {
     const foreground = ffiForegroundPid();
-    const result = foreground !== undefined ? ancestors.has(foreground) : undefined;
-    status = { ...status, lastForegroundPid: foreground, lastResult: result };
-    return result;
+    if (foreground !== undefined) {
+      const result = ancestors.has(foreground);
+      status = { ...status, lastForegroundPid: foreground, lastResult: result };
+      return result;
+    }
+    // Observed in Bun on Windows: GetForegroundWindow returns NULL through bun:ffi
+    // even while a terminal window is in the foreground. Fall through to the
+    // PowerShell probe instead of reporting "unknown" (which fails open).
   }
   const foreground = await foregroundPidViaPowerShell();
   const result = foreground !== undefined ? ancestors.has(foreground) : undefined;

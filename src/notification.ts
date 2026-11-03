@@ -1,6 +1,7 @@
 import type { AttentionSound, Context } from "@opencode/plugin/tui/context";
 import type { Locale } from "./i18n";
 import { t } from "./i18n";
+import { diag } from "./diag";
 
 /**
  * Notification dispatch for opencode-agent-pulse.
@@ -147,10 +148,11 @@ async function windowsNotify(payload: NotifyPayload): Promise<void> {
         // Windows fallback only needs to supply the missing system toast.
         sound: false,
       },
-      () => {},
+      (error, response) => diag("windowsNotify:callback", { error: error ? String(error) : null, response }),
     );
-  } catch {
+  } catch (error) {
     // best-effort; a failed toast must never break the plugin
+    diag("windowsNotify:error", { error: String(error) });
   }
 }
 
@@ -162,28 +164,46 @@ async function builtinNotify(api: Api, payload: NotifyPayload) {
       notification: { when: "always" },
       sound: payload.sound,
     });
-  } catch {
+  } catch (error) {
     // best-effort; a failed notification must never break the plugin
+    diag("builtinNotify:error", { error: String(error) });
     return undefined;
   }
 }
 
 async function dispatch(api: Api, payload: NotifyPayload, gate?: NotifyGate): Promise<void> {
-  if (gate?.onlyWhenUnfocused && (await gate.focused()) === true) {
+  const focused = gate?.onlyWhenUnfocused ? await gate.focused() : undefined;
+  diag("dispatch", {
+    title: payload.title,
+    message: payload.message,
+    onlyWhenUnfocused: gate?.onlyWhenUnfocused,
+    focused,
+  });
+  if (gate?.onlyWhenUnfocused && focused === true) {
     // Terminal is focused -> the user is watching, suppress the notification.
     // Unknown focus (no focus events, e.g. Windows Terminal) still dispatches.
+    diag("dispatch:suppressed-focused");
     return;
   }
   // Let the host apply its attention policy (enabled/disabled, sound, focus)
   // everywhere, including Windows. On Windows the notification channel is
   // silently dropped by unsupported terminals, so fall back to a real toast.
   const result = await builtinNotify(api, payload);
-  if (
-    IS_WINDOWS &&
-    result &&
-    result.notification === false &&
-    result.skipped !== "attention_disabled"
-  ) {
+  diag(
+    "dispatch:builtin-result",
+    result
+      ? { ok: result.ok, notification: result.notification, sound: result.sound, skipped: result.skipped }
+      : { result: "undefined" },
+  );
+  // On Windows the host channel only queues an OSC sequence: `triggerNotification`
+  // reports success as soon as the bytes are written, even in Windows Terminal,
+  // which cannot display OSC 9/99. Never trust `result.notification` there —
+  // unless attention is globally disabled, always post a real Action Center toast.
+  if (IS_WINDOWS && result?.skipped !== "attention_disabled") {
+    diag("dispatch:windows-fallback", {
+      hostNotification: result?.notification ?? null,
+      hostSkipped: result?.skipped ?? null,
+    });
     await windowsNotify(payload);
   }
 }
@@ -219,9 +239,36 @@ export async function notifyTurnDone(api: Api, gate?: NotifyGate, locale: Locale
   );
 }
 
+/**
+ * Notify that a session run ended in failure.
+ *
+ * Unlike the "done" notifications this is not an opt-in duplicate of the host's
+ * built-in notifier: OpenCode 2.x's `opencode.notifications` plugin is typically
+ * disabled so this plugin owns the whole notification surface, and it has to
+ * cover errors itself. Subagent failures are surfaced separately because the
+ * parent turn may still finish successfully afterwards.
+ */
+export async function notifySessionError(
+  api: Api,
+  kind: "session" | "subagent",
+  detail?: string,
+  gate?: NotifyGate,
+  locale: Locale = "en",
+): Promise<void> {
+  const messages = t(locale);
+  await dispatch(
+    api,
+    {
+      title: "opencode-agent-pulse",
+      message: kind === "subagent" ? messages.subagentError(detail) : messages.sessionError(detail),
+      sound: { name: "error" },
+    },
+    gate,
+  );
+}
+
 /** What kind of user interaction is blocking the main session. */
 export type InterviewKind = "question" | "permission";
-
 /**
  * Notify that the main session is blocked waiting for user input (an interview:
  * the `question` tool asking the user something, or a permission/approval prompt).

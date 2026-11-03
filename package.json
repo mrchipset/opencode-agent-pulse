@@ -1,6 +1,6 @@
 {
   "name": "opencode-agent-pulse",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "OpenCode TUI plugin that live-displays running subagents in the sidebar with busy/idle status, elapsed time, and click-through to the sub-session context.",
   "license": "MIT",

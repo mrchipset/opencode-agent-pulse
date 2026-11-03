@@ -1,8 +1,9 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { NotifyGate } from "./notification";
-import { notifyInterviewInput, notifySubagentsDone, notifyTurnDone } from "./notification";
+import { notifyInterviewInput, notifySessionError, notifySubagentsDone, notifyTurnDone } from "./notification";
 import { resolveLocale, t } from "./i18n";
+import { diag, initDiag } from "./diag";
 import { ensureWindowsFocusInit, getFocusStatus, isTerminalFocused } from "./windows-focus";
 
 /**
@@ -45,13 +46,16 @@ type Session = NonNullable<ReturnType<Plugin.Context["data"]["session"]["get"]>>
 
 type Options = {
   locale?: unknown;
+  debug?: boolean;
   notifications?: {
     subagents?: boolean;
     mainSession?: boolean;
     interview?: boolean;
+    errors?: boolean;
     onlyWhenUnfocused?: boolean;
   };
   sidebar?: {
+    show?: boolean;
     showFocus?: boolean;
   };
 };
@@ -266,14 +270,28 @@ const plugin = Plugin.define({
   id: "opencode-agent-pulse",
   setup(context) {
     const options = (context.options ?? {}) as Options;
+    initDiag(options.debug === true);
+    diag("setup", {
+      cwd: process.cwd(),
+      location: context.location?.directory,
+      options,
+    });
     const notifCfg = options.notifications;
     // Opt-in: OpenCode 2.x ships `opencode.notifications`, which covers the same
     // events. Defaulting to off avoids duplicate sounds/toasts.
     const notifySubagents = notifCfg?.subagents ?? false;
     const notifyMainSession = notifCfg?.mainSession ?? false;
     const notifyInterview = notifCfg?.interview ?? false;
-    const notifyOnlyWhenUnfocused = notifCfg?.onlyWhenUnfocused ?? false;
+    const notifyErrors = notifCfg?.errors ?? false;
+    // Default to "don't disturb while the user is watching", matching the host's
+    // built-in notifications plugin (`notification.when: "blurred"`). The Windows
+    // fallback checks the foreground window because Windows Terminal reports no
+    // focus events at all.
+    const notifyOnlyWhenUnfocused = notifCfg?.onlyWhenUnfocused ?? true;
     const locale = resolveLocale(options.locale);
+    // `sidebar.show: false` keeps the notification half alive while claiming no
+    // `sidebar.content` slot at all — no component tree, no 1s ticker.
+    const showSidebar = options.sidebar?.show ?? true;
     const showFocus = options.sidebar?.showFocus ?? false;
 
     // Subagents observed running during this activation. Recorded from the live
@@ -308,6 +326,7 @@ const plugin = Plugin.define({
       focused: async () => {
         const win = await isTerminalFocused();
         refreshFocusDiag();
+        diag("focus-check", { win: win ?? null, renderer: focused ?? null, ...getFocusStatus() });
         return win ?? focused;
       },
     };
@@ -328,11 +347,27 @@ const plugin = Plugin.define({
     const isSubagent = (sessionID: string) =>
       context.data.session.get(sessionID)?.parentID !== undefined;
 
+    // Windows paths reach us as either `C:\a\b` (TUI cwd) or `C:/a/b` (session
+    // records), so compare slash style and, on Windows, case-insensitively.
+    const normalizePath = (value: string) => {
+      const slashed = value.replace(/\\/g, "/").replace(/\/+$/, "");
+      return process.platform === "win32" ? slashed.toLowerCase() : slashed;
+    };
+    const sameLocation = (a?: string, b?: string) => !a || !b || normalizePath(a) === normalizePath(b);
+
     // A TUI can be attached to one location; ignore events for other worktrees.
-    const atThisLocation = (event: { location?: { directory?: string } }) => {
+    // Execution events carry no `location`, so fall back to the session record.
+    const atThisLocation = (
+      event: { type?: string; location?: { directory?: string } },
+      sessionID?: string,
+    ) => {
       const here = context.location?.directory;
-      const there = event.location?.directory;
-      return !here || !there || here === there;
+      const there =
+        event.location?.directory ??
+        (sessionID ? context.data.session.get(sessionID)?.location?.directory : undefined);
+      const ok = sameLocation(here, there);
+      if (!ok) diag("location-mismatch", { event: event.type, here, there });
+      return ok;
     };
 
     // Only direct children count: a grandchild reports to its own parent, and running
@@ -364,6 +399,13 @@ const plugin = Plugin.define({
     };
 
     const ended = (sessionID: string) => {
+      diag("ended:enter", {
+        sessionID,
+        terminal: terminal.has(sessionID),
+        errored: errored.has(sessionID),
+        subagent: isSubagent(sessionID),
+        notifyMainSession,
+      });
       if (terminal.has(sessionID)) return;
       terminal.add(sessionID);
       if (errored.has(sessionID)) {
@@ -380,6 +422,14 @@ const plugin = Plugin.define({
 
     const endedSubagent = (sessionID: string) => {
       const tracked = activeSubagents.delete(sessionID);
+      diag("endedSubagent", {
+        sessionID,
+        tracked,
+        remaining: activeSubagents.size,
+        roundNotified,
+        notifySubagents,
+        roundCount,
+      });
       if (!tracked || activeSubagents.size > 0 || roundNotified) return;
       roundNotified = true;
       if (notifySubagents) {
@@ -388,23 +438,32 @@ const plugin = Plugin.define({
     };
 
     // Retry state: the host only projects running/idle, so track the transient backoff.
-    unsubs.push(
-      context.data.on("session.retry.scheduled", (event) => {
-        if (!atThisLocation(event)) return;
-        markRetrying(event.data.sessionID, true);
-      }),
-    );
+    // Only the sidebar renders it, so skip the subscription when the section is hidden.
+    if (showSidebar) {
+      unsubs.push(
+        context.data.on("session.retry.scheduled", (event) => {
+          if (!atThisLocation(event)) return;
+          markRetrying(event.data.sessionID, true);
+        }),
+      );
+    }
 
     // Execution lifecycle. This is the V2 replacement for the V1
     // session.status / message.part.updated completion signals.
     unsubs.push(
       context.data.on("session.execution.started", (event) => {
-        if (!atThisLocation(event)) return;
+        const here = atThisLocation(event, event.data.sessionID);
+        diag("event:execution.started", {
+          sessionID: event.data.sessionID,
+          location: event.location?.directory,
+          atLocation: here,
+        });
+        if (!here) return;
         const sessionID = event.data.sessionID;
         started(sessionID);
         // Record every start; the renderer only keeps entries with a parentID.
         // This still catches a subagent whose session info has not landed yet.
-        markSeen(sessionID);
+        if (showSidebar) markSeen(sessionID);
         if (!isSubagent(sessionID)) return;
         if (activeSubagents.size === 0) {
           roundCount = 0;
@@ -417,8 +476,15 @@ const plugin = Plugin.define({
 
     unsubs.push(
       context.data.on("session.execution.succeeded", (event) => {
-        if (!atThisLocation(event)) return;
+        if (!atThisLocation(event, event.data.sessionID)) return;
         const sessionID = event.data.sessionID;
+        const subagent = isSubagent(sessionID);
+        diag("event:execution.succeeded", {
+          sessionID,
+          subagent,
+          runningChild: subagent ? undefined : hasRunningChild(sessionID),
+          notifyMainSession,
+        });
         markRetrying(sessionID, false);
         if (isSubagent(sessionID)) {
           endedSubagent(sessionID);
@@ -432,22 +498,40 @@ const plugin = Plugin.define({
 
     unsubs.push(
       context.data.on("session.execution.failed", (event) => {
-        if (!atThisLocation(event)) return;
+        if (!atThisLocation(event, event.data.sessionID)) return;
         const sessionID = event.data.sessionID;
+        diag("event:execution.failed", {
+          sessionID,
+          subagent: isSubagent(sessionID),
+          notifyErrors,
+        });
         markRetrying(sessionID, false);
         errored.add(sessionID);
         if (isSubagent(sessionID)) {
           endedSubagent(sessionID);
-          return;
+        } else {
+          ended(sessionID);
         }
-        ended(sessionID);
+        if (!notifyErrors) return;
+        // A failed run never reaches the "done" notification: `ended` bails out on
+        // `errored`, so this is the only signal the user gets for a broken turn.
+        const info = context.data.session.get(sessionID);
+        const detail = info?.title || info?.agent || undefined;
+        notifySessionError(
+          context,
+          isSubagent(sessionID) ? "subagent" : "session",
+          detail,
+          notifyGate,
+          locale,
+        ).catch(() => {});
       }),
     );
 
     unsubs.push(
       context.data.on("session.execution.interrupted", (event) => {
-        if (!atThisLocation(event)) return;
+        if (!atThisLocation(event, event.data.sessionID)) return;
         const sessionID = event.data.sessionID;
+        diag("event:execution.interrupted", { sessionID, subagent: isSubagent(sessionID) });
         markRetrying(sessionID, false);
         if (isSubagent(sessionID)) {
           endedSubagent(sessionID);
@@ -459,7 +543,7 @@ const plugin = Plugin.define({
 
     unsubs.push(
       context.data.on("session.deleted", (event) => {
-        if (!atThisLocation(event)) return;
+        if (!atThisLocation(event, event.data.sessionID)) return;
         const sessionID = event.data.sessionID;
         terminal.delete(sessionID);
         errored.delete(sessionID);
@@ -478,7 +562,7 @@ const plugin = Plugin.define({
     // permissions still arrive as their own request/response pair.
     unsubs.push(
       context.data.on("form.created", (event) => {
-        if (!atThisLocation(event)) return;
+        if (!atThisLocation(event, event.data.form.sessionID)) return;
         const form = event.data.form;
         if (!notifyInterview || isSubagent(form.sessionID) || pendingForms.has(form.id)) return;
         pendingForms.add(form.id);
@@ -498,8 +582,8 @@ const plugin = Plugin.define({
 
     unsubs.push(
       context.data.on("permission.asked", (event) => {
-        if (!atThisLocation(event)) return;
         const { id, sessionID, action } = event.data;
+        if (!atThisLocation(event, sessionID)) return;
         if (!notifyInterview || isSubagent(sessionID) || pendingPermissions.has(id)) return;
         const timer = setTimeout(() => {
           if (pendingPermissions.delete(id)) {
@@ -518,23 +602,28 @@ const plugin = Plugin.define({
       }),
     );
 
-    context.ui.slot({
-      // First in the sidebar: a live status section must stay visible when the
-      // built-in Context/MCP/Todo blocks fill the column.
-      prepend: "sidebar.content",
-      render: (slot) => (
-        <Sidebar
-          context={context}
-          sessionID={slot.sessionID}
-          retrying={retrying}
-          seen={seen}
-          markSeen={markSeen}
-          focusDiag={focusDiag}
-          showFocus={showFocus}
-          locale={locale}
-        />
-      ),
-    });
+    // `sidebar.show: false` still registers the event plumbing above (notifications keep
+    // working) but contributes nothing to the sidebar. The option is read once at setup,
+    // so this is a startup-level switch, not a runtime toggle.
+    if (showSidebar) {
+      context.ui.slot({
+        // First in the sidebar: a live status section must stay visible when the
+        // built-in Context/MCP/Todo blocks fill the column.
+        prepend: "sidebar.content",
+        render: (slot) => (
+          <Sidebar
+            context={context}
+            sessionID={slot.sessionID}
+            retrying={retrying}
+            seen={seen}
+            markSeen={markSeen}
+            focusDiag={focusDiag}
+            showFocus={showFocus}
+            locale={locale}
+          />
+        ),
+      });
+    }
 
     return () => {
       context.renderer.off("focus", onFocus);

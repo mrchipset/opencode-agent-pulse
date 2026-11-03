@@ -56,13 +56,20 @@ OpenCode 2.x reads `plugins` from `opencode.json`; the V1 `tui.json` is not used
 
 ## Notifications
 
-OpenCode 2.x already ships a built-in notifications plugin (`opencode.notifications`) that covers session/subagent completion and permission/form waits. The pulse notification channels therefore default to **off**; enable only the ones you want, and disable the built-in plugin if you prefer the pulse versions. To disable the built-in one:
+OpenCode 2.x ships a built-in notifications plugin (`opencode.notifications`) that covers session/subagent completion and permission/form waits. The pulse notification channels therefore default to **off**; enable only the ones you want. If you want the pulse versions to be the only notifications (no duplicate sounds, no `subagent_done` sound on every subagent), disable the built-in one by id:
 
 ```jsonc
-"plugins": ["-opencode.notifications", "opencode-agent-pulse"]
+// cli.json
+"plugin_enabled": { "opencode.notifications": false }
 ```
 
-On Windows the built-in attention path cannot show a system notification (Windows Terminal does not implement OSC 99 + DEC 1004 — issue #35055), so this plugin posts a real Action Center toast via `node-notifier` (bundled SnoreToast.exe). On other platforms it uses `context.attention.notify()`.
+The built-in also covers session errors, so enable `notifications.errors` (below) when you turn it off.
+
+On Windows the built-in attention path cannot show a system notification (Windows Terminal does not implement OSC 99 + DEC 1004 — issue #35055). Worse, `renderer.triggerNotification()` still reports success because it only queues the escape sequence, so trust it only for the sound. This plugin therefore always posts a real Action Center toast via `node-notifier` (bundled SnoreToast.exe) on Windows unless attention is globally disabled; on other platforms it uses `context.attention.notify()` alone.
+
+Notifications are scoped to the TUI's own location: events without a `location` (execution lifecycle) are matched against the session's recorded directory, so several TUI windows open on different projects do not each notify for the same turn.
+
+The sidebar section and the notifications are independent: `sidebar.show: false` removes the section while every enabled notification keeps working.
 
 Options (object form in the `plugins` array):
 
@@ -76,9 +83,10 @@ Options (object form in the `plugins` array):
         "subagents": true,
         "mainSession": false,
         "interview": true,
+        "errors": true,
         "onlyWhenUnfocused": true
       },
-      "sidebar": { "showFocus": false }
+      "sidebar": { "show": true, "showFocus": false }
     }
   }
 ]
@@ -89,13 +97,16 @@ Options (object form in the `plugins` array):
 | `notifications.subagents` | `false` | Notify when all delegated subagents of a batch have finished |
 | `notifications.mainSession` | `false` | Notify when the main (top-level) session finishes a conversation turn |
 | `notifications.interview` | `false` | Notify when the main session is blocked waiting for user input (form / permission approval) |
-| `notifications.onlyWhenUnfocused` | `false` | Only send notifications while the terminal window is unfocused. On non-Windows terminals it uses DEC 1004 focus reporting via the renderer. On Windows it checks the Win32 foreground window (`GetForegroundWindow`) against the plugin's process ancestry. When focus cannot be determined, notifications are sent as usual |
+| `notifications.errors` | `false` | Notify when a session run fails (main session and subagents, with distinct wording) |
+| `notifications.onlyWhenUnfocused` | `true` | Stay silent while the terminal window is focused, so a toast does not pop up before you have finished reading the reply. On non-Windows terminals it uses DEC 1004 focus reporting via the renderer. On Windows it checks the Win32 foreground window (`GetForegroundWindow`) against the plugin's process ancestry. When focus cannot be determined, notifications are sent as usual. Set to `false` to notify even while you are watching |
 | `locale` | `"en"` | Language for user-facing strings (notification messages + sidebar section title). Supported: `"en"`, `"zh"` |
+| `debug` | `false` | Append a diagnostic trace (setup, events, notification results) to `<tmp>/opencode-agent-pulse-diag.log`. Also enabled by creating the marker file `<tmp>/opencode-agent-pulse-debug.on` — useful to debug a live TUI without editing the config |
+| `sidebar.show` | `true` | Render the "Subagents" section in the sidebar. Set to `false` to keep notifications but claim no `sidebar.content` slot at all |
 | `sidebar.showFocus` | `false` | Show a small diagnostic line with the current focus state (`focus[backend] ●focused / ○blurred fg=<pid>`) |
 
 ## Usage
 
-After starting OpenCode, trigger a subagent delegation (Task tool or an agent command) and the "Subagents" section appears at the top of the sidebar, showing each subagent's name, owning agent, status (`busy` / `retry` / `idle` / `done` / `error` / `stopped`), and elapsed time in real time. Click the header to collapse/expand it.
+After starting OpenCode, trigger a subagent delegation (Task tool or an agent command) and the "Subagents" section appears at the top of the sidebar, showing each subagent's name, owning agent, status (`busy` / `retry` / `idle` / `done` / `error` / `stopped`), and elapsed time in real time. Click the header to collapse/expand it. Set `sidebar.show: false` to hide the section entirely — notifications are unaffected.
 
 ## Project structure
 
